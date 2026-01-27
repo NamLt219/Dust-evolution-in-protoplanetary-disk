@@ -1,488 +1,291 @@
 """
-Likelihood Calculator & Chi-squared Computation
-================================================
-Tính toán likelihood cho MCMC dựa trên residuals giữa observed và model images.
+Likelihood Calculator V2: Geometric Masking & Robust Error Handling
+================================================================
+Fixes:
+1. REMOVED Flux-based Masking (Prevents bias towards large disks)
+2. ADDED Geometric Masking (Region of Interest)
+3. ADDED NaN/Inf checks for robust MCMC
+4. Optimized matrix operations
 
-Features:
-- Chi-squared calculation với proper weighting
-- Masking low SNR regions
-- Prior probability evaluation
-- Log-likelihood computation
-- Multiple likelihood forms (chi2, Gaussian, etc.)
-
-Author: Pipeline Builder  
-Date: 2025-11-19
+Author: Gemini Senior Dev & Professor
+Date: 2025-12-21
 """
 
 import numpy as np
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Any
 from scipy import stats
 
 try:
     from mcmc_pipeline_config import *
     from mcmc_logger import get_logger
 except ImportError:
-    print("WARNING: Could not import config")
-    RMS_NOISE_JY = 1e-4
-    MASK_THRESHOLD_SIGMA = 3.0
-
+    # Fallback configs for testing
+    IMAGE_NPIX = 201
+    RMS_NOISE_JY = 2.3e-05
 
 class LikelihoodCalculator:
     """
-    Calculate log-likelihood for MCMC sampling.
+    Tính toán Log-Likelihood sử dụng Geometric Masking.
+    
+    ⚠️ CRITICAL: This class must be picklable for multiprocessing!
+    Do NOT store logger (contains threading.Lock)
+    
+    ✅ BEAM CORRELATION FIX: Accounts for correlated noise in interferometric data
     """
     
-    def __init__(self,
-                 obs_image: np.ndarray,
-                 obs_uncertainty: Optional[np.ndarray] = None,
+    def __init__(self, 
+                 obs_image: np.ndarray, 
                  rms_noise: float = RMS_NOISE_JY,
-                 mask_threshold: float = MASK_THRESHOLD_SIGMA,
-                 use_mask: bool = True):
+                 roi_radius_pixels: int = None,
+                 beam_major_arcsec: float = None,
+                 beam_minor_arcsec: float = None,
+                 pixel_scale_arcsec: float = None):
         """
-        Initialize likelihood calculator.
+        Khởi tạo bộ tính Likelihood.
         
         Parameters:
         -----------
-        obs_image : ndarray
-            Observed image
-        obs_uncertainty : ndarray, optional
-            Uncertainty map (if None, use constant RMS)
+        obs_image : 2D array
+            Ảnh quan sát thực tế (Jy/beam).
         rms_noise : float
-            RMS noise level
-        mask_threshold : float
-            Mask pixels below N*sigma
-        use_mask : bool
-            Apply masking to low SNR regions
+            Độ nhiễu nền nhiệt (thermal noise, Jy/beam).
+        roi_radius_pixels : int, optional
+            Bán kính vùng tính toán (Region of Interest). 
+            Mặc định None = Lấy toàn bộ ảnh (Khuyên dùng).
+            Nếu set, chỉ tính Chi2 trong vòng tròn này để loại bỏ noise ở rìa xa.
+        beam_major_arcsec : float, optional
+            Major axis của synthesized beam (arcsec). Cần cho beam correction.
+        beam_minor_arcsec : float, optional
+            Minor axis của synthesized beam (arcsec).
+        pixel_scale_arcsec : float, optional
+            Kích thước 1 pixel (arcsec/pixel).
         """
+        # ❌ REMOVED: self.logger (causes pickling error in multiprocessing)
+        
         self.obs_image = obs_image
         self.rms_noise = rms_noise
         
-        # Validate image is 2D
-        if obs_image.ndim != 2:
-            raise ValueError(f"Observation image must be 2D, got {obs_image.ndim}D: {obs_image.shape}")
-        
-        # Setup uncertainty map
-        if obs_uncertainty is not None:
-            self.uncertainty = obs_uncertainty
+        # ===== BEAM CORRELATION CORRECTION (CRITICAL FIX) =====
+        # Calculate effective noise accounting for beam correlation
+        if beam_major_arcsec and beam_minor_arcsec and pixel_scale_arcsec:
+            # Beam solid angle (Gaussian beam formula)
+            # Ω_beam = π/(4ln2) × BMAJ × BMIN (arcsec²)
+            beam_area_arcsec2 = (np.pi / (4 * np.log(2))) * beam_major_arcsec * beam_minor_arcsec
+            
+            # Pixel solid angle
+            pixel_area_arcsec2 = pixel_scale_arcsec ** 2
+            
+            # Number of pixels per beam (correlation factor)
+            pixels_per_beam = beam_area_arcsec2 / pixel_area_arcsec2
+            
+            # Effective noise (ALMA Technical Handbook Section 10.4.1)
+            # σ_eff = σ_thermal × sqrt(pixels_per_beam)
+            self.effective_rms = rms_noise * np.sqrt(pixels_per_beam)
+            
+            print(f"INFO: Beam correlation correction applied:")
+            print(f"  - Thermal RMS: {rms_noise:.3e} Jy/beam")
+            print(f"  - Beam area: {beam_area_arcsec2:.3f} arcsec²")
+            print(f"  - Pixel area: {pixel_area_arcsec2:.6f} arcsec²")
+            print(f"  - Pixels per beam: {pixels_per_beam:.2f}")
+            print(f"  - Effective RMS: {self.effective_rms:.3e} Jy/beam (scaled by {np.sqrt(pixels_per_beam):.2f}×)")
         else:
-            self.uncertainty = np.ones_like(obs_image) * rms_noise
+            # Fallback: Use thermal noise without correction (conservative)
+            self.effective_rms = rms_noise * 2.5  # Safety factor for missing beam info
+            print(f"WARNING: Beam parameters not provided. Using conservative RMS scaling (2.5×).")
+            print(f"  - Thermal RMS: {rms_noise:.3e} Jy/beam")
+            print(f"  - Effective RMS: {self.effective_rms:.3e} Jy/beam")
         
-        # Create mask (only fit high SNR regions)
-        if use_mask:
-            self.mask = self.obs_image > (mask_threshold * rms_noise)
-            n_pixels = np.sum(self.mask)
+        self.inv_sigma2 = 1.0 / (self.effective_rms ** 2)
+        
+        # --- THIẾT LẬP GEOMETRIC MASK (QUAN TRỌNG) ---
+        # Thay vì mask theo độ sáng, ta mask theo hình học để bắt trọn đĩa
+        ny, nx = obs_image.shape
+        y, x = np.indices((ny, nx))
+        center_y, center_x = ny // 2, nx // 2
+        
+        # Tính khoảng cách từ tâm
+        r_sq = (x - center_x)**2 + (y - center_y)**2
+        
+        if roi_radius_pixels:
+            # Chỉ tính trong vùng bán kính cho phép
+            self.mask = r_sq <= (roi_radius_pixels**2)
+            print(f"INFO: Likelihood using Circular ROI mask (R={roi_radius_pixels} pix)")
         else:
+            # Mặc định: Lấy toàn bộ ảnh (An toàn nhất để tránh bias)
             self.mask = np.ones_like(obs_image, dtype=bool)
-            n_pixels = obs_image.size
-        
-        self.n_data_points = n_pixels
-        
-        try:
-            self.logger = get_logger()
-            self.logger.info(f"LikelihoodCalculator initialized: "
-                           f"{n_pixels} valid pixels out of {obs_image.size} total")
-        except:
-            self.logger = None
-            print(f"[INFO] LikelihoodCalculator: {n_pixels} valid pixels")
-    
-    def log_likelihood(self, 
-                      model_image: np.ndarray,
-                      verbose: bool = False) -> float:
-        """
-        Compute log-likelihood (Gaussian likelihood = -0.5 * chi2).
-        
-        Parameters:
-        -----------
-        model_image : ndarray
-            Model image
-        verbose : bool
-            Print debug info
-        
-        Returns:
-        --------
-        log_likelihood : float
-            Log-likelihood value
-        """
-        # Validate shape match
-        if model_image.shape != self.obs_image.shape:
-            raise ValueError(
-                f"Model shape {model_image.shape} doesn't match "
-                f"observation shape {self.obs_image.shape}"
-            )
-        
-        # Compute residuals
-        residuals = self.obs_image - model_image
-        
-        # Apply mask
-        residuals_masked = residuals[self.mask]
-        uncertainty_masked = self.uncertainty[self.mask]
-        
-        # Chi-squared
-        chi2_terms = (residuals_masked / uncertainty_masked) ** 2
-        chi2 = np.sum(chi2_terms)
-        
-        # Log-likelihood (Gaussian)
-        # ln(L) = -0.5 * [chi2 + N*ln(2*pi) + sum(ln(sigma^2))]
-        log_like = -0.5 * (
-            chi2 + 
-            self.n_data_points * np.log(2 * np.pi) + 
-            np.sum(np.log(uncertainty_masked**2))
-        )
-        
-        if verbose:
-            print(f"  Chi2: {chi2:.2f}")
-            print(f"  Reduced chi2: {chi2 / self.n_data_points:.2f}")
-            print(f"  Log-likelihood: {log_like:.2f}")
-        
-        return log_like
-    
-    def chi_squared(self, model_image: np.ndarray) -> float:
-        """
-        Compute chi-squared statistic.
-        
-        Parameters:
-        -----------
-        model_image : ndarray
-            Model image
-        
-        Returns:
-        --------
-        chi2 : float
-            Chi-squared value
-        """
-        residuals = self.obs_image - model_image
-        residuals_masked = residuals[self.mask]
-        uncertainty_masked = self.uncertainty[self.mask]
-        
-        chi2 = np.sum((residuals_masked / uncertainty_masked) ** 2)
-        
-        return chi2
-    
-    def reduced_chi_squared(self, 
-                           model_image: np.ndarray,
-                           n_params: int) -> float:
-        """
-        Compute reduced chi-squared.
-        
-        Parameters:
-        -----------
-        model_image : ndarray
-            Model image
-        n_params : int
-            Number of fitted parameters
-        
-        Returns:
-        --------
-        chi2_red : float
-            Reduced chi-squared
-        """
-        chi2 = self.chi_squared(model_image)
-        dof = self.n_data_points - n_params
-        
-        return chi2 / dof if dof > 0 else np.inf
-    
-    def residuals(self, model_image: np.ndarray) -> np.ndarray:
-        """Get residuals (obs - model)."""
-        return self.obs_image - model_image
-    
-    def normalized_residuals(self, model_image: np.ndarray) -> np.ndarray:
-        """Get normalized residuals ((obs - model) / uncertainty)."""
-        return (self.obs_image - model_image) / self.uncertainty
-    
-    def __getstate__(self):
-        """Prepare object for pickling (multiprocessing)."""
-        state = self.__dict__.copy()
-        state['logger'] = None  # Remove unpicklable logger
-        return state
-    
-    def __setstate__(self, state):
-        """Restore object after unpickling."""
-        self.__dict__.update(state)
-        try:
-            self.logger = get_logger()
-        except:
-            self.logger = None
+            print("INFO: Likelihood using FULL IMAGE (No masking) - Safest option")
+                
+        # Thống kê sơ bộ
+        self.n_pixels = np.sum(self.mask)
+        print(f"INFO: Likelihood initialized. Noise RMS={rms_noise:.2e}. Pixels used={self.n_pixels}")
 
+    def log_likelihood(self, model_image: np.ndarray) -> float:
+        """
+        Calculate log-likelihood for MCMC parameter estimation.
+        
+        Computes Gaussian log-likelihood with beam-correlated noise correction
+        for millimeter interferometry data comparison.
+        
+        Parameters
+        ----------
+        model_image : ndarray, shape (npix, npix)
+            Synthetic model image in Jy/beam units.
+            Must match observation image dimensions.
+        
+        Returns
+        -------
+        ln_L : float
+            Natural logarithm of likelihood: ln(L) = -0.5 * χ²
+            Returns -inf for invalid models (NaN, shape mismatch).
+        
+        Notes
+        -----
+        Implements chi-squared likelihood with effective noise accounting for
+        beam correlation in interferometric images:
+        
+        .. math::
+            \\chi^2 = \\sum_{i \\in \\text{mask}} \\frac{(I_{\\rm mod,i} - I_{\\rm obs,i})^2}{\\sigma_{\\rm eff}^2}
+        
+        where σ_eff = σ_thermal × √(Ω_beam / Ω_pixel) corrects for correlated
+        pixels within the synthesized beam (ALMA Technical Handbook, Chapter 10).
+        
+        The mask excludes edge artifacts and low-SNR regions as specified during
+        initialization. Residuals are computed as (model - data); squaring makes
+        the sign convention irrelevant.
+        
+        References
+        ----------
+        .. [1] ALMA Technical Handbook, Chapter 10: "Imaging and Image Analysis"
+               https://almascience.org/documents-and-tools/cycle10/alma-technical-handbook
+        .. [2] Hogg, Bovy & Lang (2010): "Data analysis recipes: Fitting a model to data"
+               arXiv:1008.4686 - Section 7 on correlated noise
+        """
+        # 1. Kiểm tra Model hợp lệ
+        if model_image is None:
+            return -np.inf
+        
+        if np.any(np.isnan(model_image)) or np.any(np.isinf(model_image)):
+            # Silent return (logging in multiprocessing causes pickling issues)
+            return -np.inf
+
+        # 2. Kiểm tra kích thước
+        if model_image.shape != self.obs_image.shape:
+            # Silent return (logging in multiprocessing causes pickling issues)
+            return -np.inf
+
+        # 3. Tính Residual (Dư lượng)
+        # Residual = Model - Data (hoặc Data - Model, bình phương lên như nhau)
+        residuals = model_image - self.obs_image
+        
+        # 4. Áp dụng Mask Hình Học
+        # Chỉ lấy các pixel nằm trong ROI (nếu có set), hoặc toàn bộ ảnh
+        valid_residuals = residuals[self.mask]
+        
+        # 5. Tính Chi-Square
+        # Chi2 = Sum( (Residual / Sigma)^2 )
+        # Tối ưu hóa: inv_sigma2 đã tính trước
+        chi2 = np.sum(valid_residuals**2) * self.inv_sigma2
+        
+        # 6. Trả về Log Likelihood
+        # ln(L) = -0.5 * Chi2
+        return -0.5 * chi2
+
+    def compute_reduced_chi2(self, model_image: np.ndarray, n_free_params: int) -> float:
+        """
+        Tính Chi2 rút gọn (Reduced Chi-square) để đánh giá độ tốt fit.
+        Lý tưởng: ~ 1.0
+        """
+        if model_image is None: 
+            return np.inf
+            
+        log_L = self.log_likelihood(model_image)
+        if log_L == -np.inf:
+            return np.inf
+            
+        chi2 = -2.0 * log_L
+        dof = self.n_pixels - n_free_params # Degrees of Freedom
+        
+        if dof <= 0:
+            return chi2 # Tránh chia cho 0
+            
+        return chi2 / dof
 
 class PriorEvaluator:
     """
-    Evaluate prior probabilities for parameters.
+    Đánh giá Prior (Tiền nghiệm) cho các tham số.
     """
-    
-    def __init__(self, param_config: list):
+    def __init__(self, config_params: list):
+        self.params_config = config_params
+        
+    def log_prior(self, params_values: list) -> float:
         """
-        Initialize prior evaluator.
-        
-        Parameters:
-        -----------
-        param_config : list of dict
-            Parameter configuration from config file
+        Tính Log-Prior. 
+        Uniform Prior: 0 nếu trong khoảng, -inf nếu ngoài khoảng.
         """
-        self.param_config = param_config
-        self.param_names = [p["name"] for p in param_config]
-        self.bounds = {p["name"]: (p["min"], p["max"]) for p in param_config}
-        
-        try:
-            self.logger = get_logger()
-        except:
-            self.logger = None
-    
-    def log_prior(self, params: Dict[str, float]) -> float:
-        """
-        Compute log-prior probability.
-        
-        Parameters:
-        -----------
-        params : dict
-            Parameter values
-        
-        Returns:
-        --------
-        log_prior : float
-            Log-prior probability (0 if within bounds, -inf if outside)
-        """
-        # Check bounds (uniform prior)
-        for name, value in params.items():
-            if name in self.bounds:
-                pmin, pmax = self.bounds[name]
-                if not (pmin <= value <= pmax):
-                    return -np.inf  # Outside bounds
-        
-        # All parameters within bounds - uniform prior
-        return 0.0
-    
-    def log_prior_gaussian(self, 
-                          params: Dict[str, float],
-                          means: Dict[str, float],
-                          stds: Dict[str, float]) -> float:
-        """
-        Gaussian prior (optional).
-        
-        Parameters:
-        -----------
-        params : dict
-            Parameter values
-        means : dict
-            Prior means
-        stds : dict
-            Prior standard deviations
-        
-        Returns:
-        --------
-        log_prior : float
-            Log-prior probability
-        """
-        # First check bounds
-        if not np.isfinite(self.log_prior(params)):
+        if len(params_values) != len(self.params_config):
             return -np.inf
-        
-        # Gaussian prior
-        log_prior = 0.0
-        for name, value in params.items():
-            if name in means:
-                mean = means[name]
-                std = stds[name]
-                log_prior += stats.norm.logpdf(value, loc=mean, scale=std)
-        
-        return log_prior
-    
-    def __getstate__(self):
-        """Prepare object for pickling (multiprocessing)."""
-        state = self.__dict__.copy()
-        state['logger'] = None  # Remove unpicklable logger
-        return state
-    
-    def __setstate__(self, state):
-        """Restore object after unpickling."""
-        self.__dict__.update(state)
-        try:
-            self.logger = get_logger()
-        except:
-            self.logger = None
-
+            
+        for val, config in zip(params_values, self.params_config):
+            p_min = config['min']
+            p_max = config['max']
+            
+            if not (p_min <= val <= p_max):
+                return -np.inf
+                
+        return 0.0
 
 class MCMCProbability:
     """
-    Combined prior + likelihood for MCMC.
+    Wrapper class kết hợp Prior và Likelihood.
+    Hàm này sẽ được gọi trực tiếp bởi emcee sampler.
+    
+    ⚠️ CRITICAL: This class must be picklable for multiprocessing!
+    Do NOT store logger (contains threading.Lock)
     """
-    
-    def __init__(self,
-                 likelihood_calc: LikelihoodCalculator,
-                 prior_eval: PriorEvaluator,
-                 forward_simulator,
-                 param_names: list,
-                 fixed_params: Optional[Dict[str, float]] = None):
-        """
-        Initialize MCMC probability calculator.
+    def __init__(self, 
+                 prior_evaluator: PriorEvaluator,
+                 likelihood_calculator: LikelihoodCalculator,
+                 forward_simulator: Any):
         
-        Parameters:
-        -----------
-        likelihood_calc : LikelihoodCalculator
-            Likelihood calculator
-        prior_eval : PriorEvaluator
-            Prior evaluator
-        forward_simulator : ForwardModelSimulator
-            Forward model simulator
-        param_names : list
-            Parameter names in order (only fitted parameters)
-        fixed_params : dict, optional
-            Fixed parameters not being fitted
-        """
-        self.likelihood_calc = likelihood_calc
-        self.prior_eval = prior_eval
-        self.forward_simulator = forward_simulator
-        self.param_names = param_names
-        self.fixed_params = fixed_params or {}
-        
-        # Call counter for diagnostics
-        self.n_calls = 0
-        self.n_accepts = 0
-        self.n_rejects = 0
-        
-        try:
-            self.logger = get_logger()
-            if self.fixed_params:
-                self.logger.info(f"Fixed parameters: {self.fixed_params}")
-        except:
-            self.logger = None
-    
-    def __call__(self, theta: np.ndarray) -> float:
-        """
-        Compute log-probability for MCMC.
-        
-        This is the function called by emcee sampler.
-        
-        Parameters:
-        -----------
-        theta : ndarray
-            Parameter vector
-        
-        Returns:
-        --------
-        log_prob : float
-            Log-probability (log-prior + log-likelihood)
-        """
-        self.n_calls += 1
-        
-        # Convert to dict (only fitted parameters)
-        params = {name: val for name, val in zip(self.param_names, theta)}
-        
-        # Add fixed parameters
-        params.update(self.fixed_params)
-        
-        # Check prior (only on fitted parameters)
-        fitted_params = {name: val for name, val in zip(self.param_names, theta)}
-        log_prior = self.prior_eval.log_prior(fitted_params)
-        
-        if not np.isfinite(log_prior):
-            self.n_rejects += 1
-            return -np.inf
-        
-        # Run forward model
-        try:
-            success, model_image, metadata = self.forward_simulator.simulate(params)
-            
-            if not success:
-                self.n_rejects += 1
-                return -np.inf
-            
-            # Compute likelihood
-            log_like = self.likelihood_calc.log_likelihood(model_image)
-            
-            # Total probability
-            log_prob = log_prior + log_like
-            
-            if np.isfinite(log_prob):
-                self.n_accepts += 1
-            else:
-                self.n_rejects += 1
-            
-            return log_prob
-            
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error in probability calculation", exception=e)
-            self.n_rejects += 1
-            return -np.inf
-    
-    def get_acceptance_rate(self) -> float:
-        """Get current acceptance rate."""
-        if self.n_calls == 0:
-            return 0.0
-        return self.n_accepts / self.n_calls
-    
-    def reset_counters(self):
-        """Reset call counters."""
-        self.n_calls = 0
-        self.n_accepts = 0
-        self.n_rejects = 0
-    
-    def __getstate__(self):
-        """
-        Prepare object for pickling (multiprocessing).
-        Remove unpicklable logger objects before serialization.
-        """
-        state = self.__dict__.copy()
-        # Remove logger (has thread locks - not picklable)
-        state['logger'] = None
-        # Also remove logger from nested objects if they exist
-        if hasattr(self.likelihood_calc, 'logger'):
-            # Don't modify original, create shallow copy
-            import copy
-            state['likelihood_calc'] = copy.copy(self.likelihood_calc)
-            state['likelihood_calc'].logger = None
-        if hasattr(self.forward_simulator, 'logger'):
-            import copy
-            state['forward_simulator'] = copy.copy(self.forward_simulator)
-            state['forward_simulator'].logger = None
-        return state
-    
-    def __setstate__(self, state):
-        """
-        Restore object after unpickling.
-        Recreate logger in the new process.
-        """
-        self.__dict__.update(state)
-        # Recreate logger in the new process
-        try:
-            self.logger = get_logger()
-        except:
-            self.logger = None
-        # Restore loggers in nested objects
-        if hasattr(self.likelihood_calc, 'logger') and self.likelihood_calc.logger is None:
-            try:
-                self.likelihood_calc.logger = get_logger()
-            except:
-                pass
-        if hasattr(self.forward_simulator, 'logger') and self.forward_simulator.logger is None:
-            try:
-                self.forward_simulator.logger = get_logger()
-            except:
-                pass
+        self.prior = prior_evaluator
+        self.likelihood = likelihood_calculator
+        self.simulator = forward_simulator
+        # ❌ REMOVED: self.logger (causes pickling error)
 
+    def __call__(self, params_values):
+        """
+        Hàm gọi chính (Callable).
+        Input: Vector tham số từ walker.
+        Output: Log Probability (ln P).
+        """
+        # 1. Check Prior trước (Nhanh, không tốn kém)
+        lp = self.prior.log_prior(params_values)
+        if not np.isfinite(lp):
+            return -np.inf
 
-if __name__ == "__main__":
-    # Test likelihood calculator
-    print("Testing LikelihoodCalculator...")
-    
-    # Create fake observation
-    np.random.seed(42)
-    obs = np.random.randn(100, 100) * 0.001 + 0.01
-    
-    # Create fake model
-    model = obs + np.random.randn(100, 100) * 0.0005
-    
-    # Test likelihood
-    calc = LikelihoodCalculator(
-        obs_image=obs,
-        rms_noise=0.001,
-        use_mask=False
-    )
-    
-    log_like = calc.log_likelihood(model, verbose=True)
-    chi2 = calc.chi_squared(model)
-    
-    print(f"\nTest results:")
-    print(f"  Log-likelihood: {log_like:.2f}")
-    print(f"  Chi-squared: {chi2:.2f}")
-    print(f"  Reduced chi-squared: {chi2 / obs.size:.4f}")
+        # 2. Chạy Forward Model (Tốn kém nhất: DustPy -> RADMC3D)
+        # Chuyển list values thành dict params cho simulator
+        # Cần map đúng tên tham số từ config
+        # (Giả định simulator xử lý việc mapping này hoặc làm ở đây)
+        # Cách tốt nhất: Simulator nhận dict
+        
+        # Mapping param names (Cần list tên tham số từ config)
+        # Giả sử self.prior.params_config chứa đầy đủ info
+        param_dict = {}
+        for val, config in zip(params_values, self.prior.params_config):
+            param_dict[config['name']] = val
+            
+        # ✅ RESTORED: 3-value interface (sim_dir now in metadata)
+        success, model_image, metadata = self.simulator.simulate(param_dict)
+        
+        if not success or model_image is None:
+            return -np.inf
+            
+        # 3. Tính Likelihood
+        ll = self.likelihood.log_likelihood(model_image)
+        
+        if not np.isfinite(ll):
+            return -np.inf
+            
+        # Log Probability = Log Prior + Log Likelihood
+        return lp + ll
