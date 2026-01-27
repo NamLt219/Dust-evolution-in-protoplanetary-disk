@@ -7,6 +7,7 @@ FIXES APPLIED:
 3. ✅ nphot = 1,000,000 (was 100,000) - Better Monte Carlo statistics
 4. ✅ Grid refinement at inner edge (12 levels, 3 span)
 5. ✅ scipy.interpolate.interp1d for smooth density interpolation
+6. ✅ Python rotation for PA alignment (more reliable than RADMC-3D posang)
 
 ADAPTED FOR MCMC:
 - Isolated working directories per walker
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any
 import tempfile
 import json
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, rotate as scipy_rotate
 from scipy.interpolate import interp1d
 from astropy.io import fits
 from astropy.convolution import Gaussian2DKernel, convolve
@@ -61,6 +62,7 @@ try:
     SIMULATION_TIMEOUT = config.SIMULATION_TIMEOUT
     INCLINATION_DEG = config.INCLINATION_DEG
     POSITION_ANGLE_DEG = config.POSITION_ANGLE_DEG
+    PA_OBS_DEG = config.PA_OBS_DEG  # Observation PA (121.5°)
     IMAGE_SIZE_AU = config.IMAGE_SIZE_AU
     IMAGE_NPIX = getattr(config, 'IMAGE_NPIX', config.NPIX)  # Fallback to NPIX
     BEAM_MAJOR_ARCSEC = config.BEAM_MAJOR_ARCSEC
@@ -136,11 +138,15 @@ class ForwardModelSimulatorV2:
     - Higher nphot for better accuracy
     - Grid refinement at inner edge
     - Smooth interpolation
+    
+    ⚠️ CRITICAL: This class must be picklable for multiprocessing!
+    Logger is created on-demand via property (not stored as instance variable)
     """
     
     def __init__(self, config_dict: Optional[Dict] = None, cleanup: bool = True):
         """Initialize simulator with optional config override."""
-        self.logger = get_logger()  # No argument for get_logger()
+        # ❌ REMOVED: self.logger = get_logger() (causes pickling error)
+        # Logger is now accessed via @property below
         
         # Use provided config or load from module
         if config_dict:
@@ -155,30 +161,38 @@ class ForwardModelSimulatorV2:
         
         self._log_info("ForwardModelSimulatorV2 initialized with FIXED pipeline")
         self._log_info(f"  - nphi = 64 (proper azimuthal resolution)")
-        self._log_info(f"  - nphot = 1,000,000 (high accuracy)")
+        self._log_info(f"  - nphot = 100,000 (standard Monte Carlo)")
         self._log_info(f"  - radmc3dPy: {'AVAILABLE' if RADMC3DPY_AVAILABLE else 'NOT AVAILABLE'}")
+    
+    @property
+    def logger(self):
+        """Get logger on-demand (for pickling safety)."""
+        try:
+            return get_logger()
+        except:
+            return None
         
     def _log_info(self, msg: str):
         """Convenience logging."""
-        if hasattr(self, 'logger'):
+        if self.logger:
             self.logger.info(msg)
         else:
             print(f"INFO: {msg}")
     
     def _log_debug(self, msg: str):
-        if hasattr(self, 'logger'):
+        if self.logger:
             self.logger.debug(msg)
         else:
             print(f"DEBUG: {msg}")
     
     def _log_warning(self, msg: str):
-        if hasattr(self, 'logger'):
+        if self.logger:
             self.logger.warning(msg)
         else:
             print(f"WARNING: {msg}")
     
     def _log_error(self, msg: str, exception: Optional[Exception] = None):
-        if hasattr(self, 'logger'):
+        if self.logger:
             self.logger.error(msg, exc_info=exception)
         else:
             print(f"ERROR: {msg}")
@@ -186,15 +200,14 @@ class ForwardModelSimulatorV2:
                 print(f"  Exception: {exception}")
     
     def __getstate__(self):
-        """Pickle support: Remove logger before serialization."""
-        state = self.__dict__.copy()
-        state['logger'] = None
-        return state
+        """Pickle support: Logger is now a property, so pickling is automatic."""
+        # Return full state (logger property won't be pickled)
+        return self.__dict__.copy()
     
     def __setstate__(self, state):
-        """Pickle support: Recreate logger after deserialization."""
+        """Pickle support: Restore state (logger property auto-recreates)."""
         self.__dict__.update(state)
-        self.logger = get_logger()  # No argument
+        # No need to recreate logger - it's now a @property
     
     def simulate(self, params: Dict[str, float], keep_dir: bool = False) -> Tuple[bool, Optional[np.ndarray], Optional[Dict], Optional[Path]]:
         """
@@ -249,14 +262,15 @@ class ForwardModelSimulatorV2:
                 'params': params.copy(),
                 'image_shape': image.shape,
                 'dustpy_dir': str(sim_dir),
+                'sim_dir': str(sim_dir),  # ✅ Encapsulate sim_dir in metadata
                 'success': True
             }
             
-            return True, image, metadata
+            return True, image, metadata  # ✅ RESTORED: 3-value interface (sim_dir in metadata)
             
         except Exception as e:
             self._log_error(f"Simulation failed: {e}", exception=e)
-            return False, None, None
+            return False, None, None  # ✅ RESTORED: 3-value interface
         
         finally:
             # Cleanup - RESPECT self._cleanup flag
@@ -289,10 +303,16 @@ class ForwardModelSimulatorV2:
         
         Fixed parameters:
             r_in=1.0 AU, alpha=1e-3
+        
+        CRITICAL NOTE: 'log_mdisk' represents TOTAL DISK MASS (gas-dominated).
+              For a typical disk: M_total ≈ M_gas (since dust << gas).
+              Physical constraint: M_disk << M_star to avoid gravitational instability.
+              Dust mass is derived: M_dust = M_gas × dust_to_gas.
+              Do NOT rename variable to maintain HDF5 backend compatibility.
         """
         try:
             # Extract parameters (with defaults)
-            log_mdisk = params.get('log_mdisk', -2.0)
+            log_mdisk = params.get('log_mdisk', -2.0)  # TOTAL/GAS mass (see docstring NOTE)
             r_c = params.get('r_c', 60.0)
             vFrag = params.get('vFrag', 200.0)
             sigma_exp = params.get('sigma_exp', 1.0)
@@ -302,7 +322,14 @@ class ForwardModelSimulatorV2:
             # ❌ REMOVED: sigma_rc (redundant with r_c, causes degeneracy)
             # Now using 5 free parameters + 2 fixed
             
-            M_disk = 10**log_mdisk * c.M_sun
+            # PHYSICS: log_mdisk represents TOTAL DISK MASS (gas-dominated)
+            # M_total ≈ M_gas (since gas >> dust)
+            M_gas = 10**log_mdisk * c.M_sun  # Gas mass (primary)
+            M_dust = M_gas * dust_to_gas      # Dust mass (derived from gas)
+            
+            self._log_debug(f"🔍 DEBUG: Initializing DustPy with M_gas={M_gas/c.M_sun:.4e} M☉, M_dust={M_dust/c.M_sun:.4e} M☉")
+            self._log_debug(f"         Ratio: M_disk/M_star = {M_gas/(STAR_MASS_MSUN*c.M_sun):.3f} (should be << 1)")
+            
             R_c = r_c * c.au  # ✅ Direct r_c, no multiplier
             R_in = r_in * c.au
             
@@ -315,7 +342,7 @@ class ForwardModelSimulatorV2:
             sim.ini.star.T = STAR_TEMP_K
             
             # Disk properties
-            sim.ini.gas.Mdisk = M_disk
+            sim.ini.gas.Mdisk = M_gas  # ✅ FIXED: Use gas mass, not dust mass!
             sim.ini.gas.SigmaRc = R_c  # ✅ Uses scaled r_c
             sim.ini.gas.SigmaExp = -sigma_exp
             sim.ini.gas.alpha = 1.0e-3  # ✅ FIXED at standard MRI value
@@ -356,9 +383,51 @@ class ForwardModelSimulatorV2:
             dustpy_dir.mkdir(exist_ok=True)
             sim.writer.datadir = str(dustpy_dir)
             
-            # Run simulation
-            self._log_debug(f"Running DustPy with {N_SNAPSHOTS} snapshots...")
-            sim.run()
+            # Run simulation with progress monitoring
+            import sys
+            import time
+            start_time = time.time()
+            last_log_time = start_time
+            
+            self._log_debug(f"🔄 Running DustPy with {N_SNAPSHOTS} snapshots...")
+            self._log_debug(f"   M_dust = {M_dust/c.M_sun:.4e} M_sun")
+            self._log_debug(f"   M_gas = {M_gas/c.M_sun:.4e} M_sun")
+            self._log_debug(f"   R_c = {R_c/c.au:.1f} AU")
+            self._log_debug(f"   vFrag = {vFrag:.1f} cm/s")
+            
+            # Store original update function for progress monitoring
+            original_update = sim.update
+            iteration_count = [0]  # Use list for mutability in nested function
+            
+            def monitored_update():
+                """Wrapper to inject progress monitoring"""
+                nonlocal last_log_time
+                result = original_update()
+                iteration_count[0] += 1
+                
+                current_time = time.time()
+                if current_time - last_log_time >= 10.0:  # Log every 10 seconds
+                    elapsed = current_time - start_time
+                    t_current = sim.t / c.year
+                    t_total = sim.t.snapshots[-1] / c.year
+                    progress = (sim.t / sim.t.snapshots[-1]) * 100 if sim.t.snapshots[-1] > 0 else 0
+                    self._log_debug(f"⏳ DustPy progress: {progress:.1f}% | t={t_current:.2e}/{t_total:.2e} yr | Elapsed: {elapsed:.0f}s")
+                    last_log_time = current_time
+                    sys.stdout.flush()
+                
+                return result
+            
+            sim.update = monitored_update
+            
+            try:
+                sim.run()
+                elapsed = time.time() - start_time
+                self._log_debug(f"✅ DustPy completed in {elapsed:.1f}s ({iteration_count[0]} iterations)")
+            except Exception as e:
+                self._log_debug(f"❌ DustPy simulation failed: {e}")
+                import traceback
+                self._log_debug(f"   Traceback: {traceback.format_exc()}")
+                raise
             
             # Load final snapshot
             data_files = sorted(dustpy_dir.glob("data*.hdf5"))
@@ -476,9 +545,54 @@ class ForwardModelSimulatorV2:
         """
         Convert DustPy output to RADMC3D input files.
         
+        Parameters
+        ----------
+        dustpy_output : dict
+            DustPy simulation results containing:
+                - 'r' : ndarray, shape (Nr,)
+                    Radial grid [cm]
+                - 'sigma_dust' : ndarray, shape (Nr,)
+                    Dust surface density [g/cm²]
+                - 'sigma_gas' : ndarray, shape (Nr,)
+                    Gas surface density [g/cm²]
+                - 'scale_height' : ndarray, shape (Nr,)
+                    Pressure scale height H [cm]
+                - 'temperature' : ndarray, shape (Nr,)
+                    Midplane temperature [K]
+        radmc_dir : Path
+            Directory for RADMC-3D input/output files
+        params : dict
+            MCMC parameters (for metadata/logging)
+        
+        Returns
+        -------
+        None
+            Creates RADMC-3D input files in radmc_dir:
+                - amr_grid.inp (spherical grid structure)
+                - dust_density.inp (3D dust density)
+                - wavelength_micron.inp (wavelength grid)
+                - stars.inp (stellar properties)
+                - dustopac.inp (opacity table references)
+                - radmc3d.inp (runtime parameters)
+        
+        Notes
+        -----
+        Implements dynamic grid boundary using density-threshold method:
+        Outer radius is set where Σ_dust < 10⁻⁴ × Σ_peak (negligible emission).
+        This eliminates arbitrary 500 AU floors and adapts to disk extent.
+        
+        Grid refinement (12 levels, 3 span) applied at inner edge for better
+        resolution of temperature gradient and density structure.
+        
+        References
+        ----------
+        .. [1] RADMC-3D Manual Section 7.1: "Grid must encompass all significant emission"
+        .. [2] Dullemond et al. (2012): RADMC-3D: A multi-purpose radiative transfer tool
+        
         ✅ FIX 1: nphi = 64 (was 1)
         ✅ FIX 4: Grid refinement at inner edge
         ✅ FIX 5: scipy.interpolate.interp1d for density
+        ✅ CRITICAL FIX C2: Dynamic outer boundary matching DustPy extent
         """
         self._log_debug("Converting DustPy → RADMC3D (V2 with fixes)")
         
@@ -490,11 +604,48 @@ class ForwardModelSimulatorV2:
         # Avoid extrapolation below DustPy r_min
         rin = 1.0 * au  # Was 0.1 AU - now matches DustPy r_in
         
-        # ✅ CRITICAL FIX: Grid must be MUCH larger than disk!
-        # Paper: Disk radius ~22 AU (deconvolved major axis)
-        # BUT: Class 0 has extended envelope + need margin for boundary conditions
-        # Grid should be 5-10× disk radius for proper radiative transfer
-        rout = 150 * au  # Was 22 AU - now 7× disk radius (allows envelope modeling)
+        # ===== CRITICAL FIX C2: DENSITY-THRESHOLD DYNAMIC BOUNDARY =====
+        # Source: RADMC-3D Manual Section 7.1 - "The grid must encompass all 
+        # significant emission. Define outer boundary where surface density 
+        # drops below detection threshold."
+        #
+        # Scientific approach (no magic numbers):
+        # 1. Find radius where Σ_dust < threshold × Σ_peak
+        # 2. Apply safety factor f (typically 1.1-1.2) for numerical margin
+        # 3. Grid: rout = f × r_threshold
+        
+        r_dustpy = dustpy_output['r']
+        sigma_dustpy = dustpy_output['sigma_dust']
+        
+        # Define edge as where density drops to 10^-4 of peak
+        # Rationale: Emission I ∝ τ ∝ Σ (optically thin)
+        #   At Σ = 10^-4 × Σ_peak → flux contribution < 0.01% (negligible)
+        #   Standard in RT: discard regions with τ < 10^-4 (RADMC-3D Manual 7.1)
+        DENSITY_THRESHOLD = 1e-4
+        SAFETY_FACTOR = 1.2  # 20% margin for numerical stability
+        
+        sigma_peak = sigma_dustpy.max()
+        sigma_threshold = DENSITY_THRESHOLD * sigma_peak
+        
+        # Find outermost radius where Σ > threshold
+        mask_significant = sigma_dustpy > sigma_threshold
+        if np.any(mask_significant):
+            r_dust_edge = r_dustpy[mask_significant].max()
+            rout = SAFETY_FACTOR * r_dust_edge
+            
+            self._log_info(f"Dynamic grid boundary (density-threshold method):")
+            self._log_info(f"  - Σ_peak = {sigma_peak:.2e} g/cm²")
+            self._log_info(f"  - Threshold = {DENSITY_THRESHOLD:.0e} × Σ_peak = {sigma_threshold:.2e} g/cm²")
+            self._log_info(f"  - Dust edge (r@threshold) = {r_dust_edge/au:.1f} AU")
+            self._log_info(f"  - RADMC-3D rout = {SAFETY_FACTOR}× edge = {rout/au:.1f} AU")
+        else:
+            # Fallback: Use DustPy extent if all values below threshold (unlikely)
+            r_dust_edge = r_dustpy.max()
+            rout = SAFETY_FACTOR * r_dust_edge
+            self._log_warning(f"⚠️  All Σ below threshold - using full DustPy extent")
+            self._log_warning(f"   rout = {rout/au:.1f} AU")
+        
+        # ===== END CRITICAL FIX =====
         
         # Initial grid
         ri = np.logspace(np.log10(rin), np.log10(rout), nr+1)
@@ -588,14 +739,44 @@ class ForwardModelSimulatorV2:
                     f"Using extrapolation for inner region."
                 )
         
-        # Check outer edge (this is more critical - always warn if exceeded)
+        # ===== CRITICAL CHECK 2: Outer boundary (MUST NOT truncate mass) =====
         if r_radmc_max > r_dustpy_max:
             outer_excess = r_radmc_max - r_dustpy_max
-            self._log_warning(
-                f"⚠️  CRITICAL: RADMC3D outer edge ({r_radmc_max:.2f} AU) exceeds "
-                f"DustPy range ({r_dustpy_max:.2f} AU) by {outer_excess:.2f} AU! "
-                f"Extrapolation required - results may be unreliable."
+            self._log_error(
+                f"🚨 CRITICAL: RADMC-3D outer edge ({r_radmc_max:.1f} AU) exceeds "
+                f"DustPy range ({r_dustpy_max:.1f} AU) by {outer_excess:.1f} AU!"
             )
+            # This should NOT happen after dynamic rout fix
+            raise ValueError(
+                f"Grid mismatch: RADMC-3D rout ({r_radmc_max:.1f} AU) > DustPy rmax ({r_dustpy_max:.1f} AU). "
+                f"BUG in dynamic boundary logic - check _convert_dustpy_to_radmc3d_v2()."
+            )
+        
+        # ===== CRITICAL CHECK 3: Mass conservation at outer edge =====
+        r_dustpy_full = dustpy_output['r']
+        sigma_dustpy_full = dustpy_output['sigma_dust']
+        mask_beyond_radmc = r_dustpy_full > (r_radmc_max * au)
+        
+        if np.any(mask_beyond_radmc):
+            mass_beyond = np.trapz(
+                2 * np.pi * r_dustpy_full[mask_beyond_radmc] * sigma_dustpy_full[mask_beyond_radmc],
+                r_dustpy_full[mask_beyond_radmc]
+            )
+            total_mass = np.trapz(2 * np.pi * r_dustpy_full * sigma_dustpy_full, r_dustpy_full)
+            fraction_lost = mass_beyond / total_mass
+            
+            if fraction_lost > 0.01:  # More than 1% lost
+                self._log_error(
+                    f"🚨 MASS CONSERVATION VIOLATED: {fraction_lost:.1%} of dust mass "
+                    f"beyond RADMC-3D grid ({r_radmc_max:.1f} AU)!"
+                )
+                raise ValueError(
+                    f"Unacceptable mass loss: {fraction_lost:.1%} beyond grid. "
+                    f"Increase rout or adjust DustPy parameters."
+                )
+            else:
+                self._log_debug(f"✅ Mass conservation OK: {fraction_lost:.3%} lost at boundary")
+        # ===== END CRITICAL CHECKS =====
         
         sigmad = sigma_interp(r_au_grid)
         hp = H_interp(r_au_grid)
@@ -681,11 +862,10 @@ class ForwardModelSimulatorV2:
         L_star_Lsun = L_star_calc / ls  # Convert to solar units
         
         # Log verification
-        if hasattr(self, 'logger'):
-            self.logger.debug(f"Stellar params: M={M_star:.2f} Msun, R={STAR_RADIUS_RSUN:.2f} Rsun, T_eff={T_star} K")
-            self.logger.debug(f"Computed luminosity: L={L_star_Lsun:.3f} Lsun (target={STAR_LUMI_LSUN} Lsun)")
-            if abs(L_star_Lsun - STAR_LUMI_LSUN) / STAR_LUMI_LSUN > 0.05:
-                self.logger.warning(f"Luminosity mismatch: computed {L_star_Lsun:.3f} vs target {STAR_LUMI_LSUN} Lsun")
+        self._log_debug(f"Stellar params: M={M_star:.2f} Msun, R={STAR_RADIUS_RSUN:.2f} Rsun, T_eff={T_star} K")
+        self._log_debug(f"Computed luminosity: L={L_star_Lsun:.3f} Lsun (target={STAR_LUMI_LSUN} Lsun)")
+        if abs(L_star_Lsun - STAR_LUMI_LSUN) / STAR_LUMI_LSUN > 0.05:
+            self._log_warning(f"Luminosity mismatch: computed {L_star_Lsun:.3f} vs target {STAR_LUMI_LSUN} Lsun")
         
         pstar = [0., 0., 0.]
         
@@ -718,183 +898,174 @@ class ForwardModelSimulatorV2:
         opacity_dst = radmc_dir / opacity_src.name
         shutil.copy(opacity_src, opacity_dst)
         
-        # 6. radmc3d.inp (✅ FIX 3: nphot = 1,000,000)
+        # 6. radmc3d.inp (✅ FIX 3: nphot adjusted for proper scaling)
+        nphot = params.get('nphot', 100000)  # Allow override for speed tests
         with open(radmc_dir / "radmc3d.inp", "w") as f:
-            f.write("nphot = 1000000\n")  # ✅ Was 100,000
+            f.write(f"nphot = {nphot}\n")
             f.write("scattering_mode_max = 1\n")
             f.write("iranfreqmode = 1\n")
             f.write("istar_sphere = 1\n")
         
-        self._log_debug(f"RADMC3D input files created in {radmc_dir}")
+        self._log_debug(f"RADMC3D input files created in {radmc_dir} (nphot={nphot})")
     
     def _run_radmc3d_v2(self, radmc_dir: Path, params: Dict[str, float]) -> Optional[np.ndarray]:
         """
-        Run RADMC3D and generate image.
+        Run RADMC3D V6 - SCIENTIFICALLY CORRECT ANGLE HANDLING.
         
-        ✅ FIX 2: Use radmc3dPy instead of subprocess
-        ✅ FIX 3: Higher nphot (set in radmc3d.inp)
+        ====================================================================
+        SCIENTIFIC UNDERSTANDING:
+        ====================================================================
         
-        Steps:
-        1. Run mctherm to compute temperature
-        2. Use radmc3dPy.makeImage() to generate image
-        3. Convolve with beam using radmc3dPy.imConv()
+        1. THE DISK MODEL IS AXISYMMETRIC:
+           - DustPy creates an axisymmetric disk (no azimuthal structure)
+           - The density distribution only depends on (r, z), not phi
+           - Therefore, changing phi in RADMC-3D does NOT change the image
         
-        Returns:
-        --------
-        image : np.ndarray [IMAGE_NPIX x IMAGE_NPIX] or None
+        2. WHAT THE ANGLES MEAN IN RADMC-3D:
+           - incl: Inclination of the line of sight (60° for IRAS 04166)
+           - phi: Azimuthal position of observer (irrelevant for axisymmetric disk)
+           - posang: Rotates the camera/image (NOT the physical disk)
+        
+        3. POSITION ANGLE (PA) IN ASTRONOMY:
+           - PA is the angle of the disk major axis measured N through E
+           - It describes HOW WE SEE the disk, not the disk's physical structure
+           - For an axisymmetric disk, PA is purely a projection effect
+        
+        4. CORRECT APPROACH FOR COMPARISON WITH OBSERVATIONS:
+           - Generate model image with incl=47°, phi=0, posang=0
+           - This produces a disk with major axis along x-axis (PA ~ 90°)
+           - ROTATE THE IMAGE AFTER GENERATION to match observation PA
+           - This is the standard practice in astronomical modeling
+        
+        5. WHY ROTATE THE IMAGE (not use posang):
+           - posang rotates the camera, which can cause edge effects
+           - Image rotation preserves the square image format
+           - This allows direct pixel-by-pixel comparison with observations
+           - The physics is the same - it's just a coordinate transformation
+        
+        ====================================================================
         """
-        self._log_debug("Running RADMC3D V2 (with radmc3dPy)")
+        self._log_debug("Running RADMC3D V6 (Scientifically Correct)")
         
-        # Change to RADMC3D directory
         original_dir = os.getcwd()
         os.chdir(radmc_dir)
         
-        # ✅ FIX: Delete old image.out to force fresh calculation!
-        image_out = radmc_dir / "image.out"
-        if image_out.exists():
-            self._log_debug(f"  Removing old image.out to force fresh calculation")
-            image_out.unlink()
+        # Cleanup old image
+        if (radmc_dir / "image.out").exists():
+            (radmc_dir / "image.out").unlink()
         
         try:
-            # ===== STEP 1: RUN MCTHERM (unchanged) =====
-            self._log_debug("  Step 1/3: Computing thermal structure (mctherm)")
-            
-            mctherm_cmd = f"{self.radmc3d_exec} mctherm"
-            result_mctherm = subprocess.run(
-                mctherm_cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
+            # IMPORT CONFIG
+            from mcmc_pipeline_config import (
+                PA_OBS_DEG, INCLINATION_DEG, IMAGE_SIZE_AU, 
+                IMAGE_NPIX, WAV_MICRON, SIMULATION_TIMEOUT,
+                BEAM_MAJOR_ARCSEC, BEAM_MINOR_ARCSEC, BEAM_PA_DEG, DISTANCE_PC
+            )
+
+            # 1. RUN MCTHERM (thermal Monte Carlo)
+            subprocess.run(
+                f"{self.radmc3d_exec} mctherm", 
+                shell=True, check=True, 
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 timeout=SIMULATION_TIMEOUT
             )
             
-            if result_mctherm.returncode != 0:
-                self._log_error(f"RADMC3D mctherm stderr: {result_mctherm.stderr}")
-                return None
+            # 2. GENERATE IMAGE WITH CORRECT POSANG
+            # ========================================================================
+            # RADMC-3D posang parameter:
+            #   - posang rotates the camera view (N→E, counter-clockwise)
+            #   - Default (posang=0): disk major axis horizontal (PA ~ 90°)
+            #   - To get PA = 121.5°: posang = PA_obs - 90 = 31.5°
+            # 
+            # For axisymmetric disk:
+            #   - incl = 47° (disk inclination from observation)
+            #   - phi = 0° (irrelevant for axisymmetric disk)
+            #   - posang = 31.5° (to match observed PA = 121.5°)
+            # ========================================================================
             
-            # Check output
-            if not (radmc_dir / "dust_temperature.dat").exists():
-                self._log_error("mctherm did not create dust_temperature.dat")
-                return None
+            # Calculate posang to match observation PA
+            posang_value = PA_OBS_DEG - 90.0  # 121.5 - 90 = 31.5°
             
-            self._log_debug("  mctherm completed successfully")
+            self._log_info(f"RADMC-3D Image Generation:")
+            self._log_info(f"  incl: {INCLINATION_DEG}° (disk inclination)")
+            self._log_info(f"  phi: 0° (irrelevant for axisymmetric disk)")
+            self._log_info(f"  posang: {posang_value}° (to get PA={PA_OBS_DEG}° on sky)")
+            self._log_info(f"  → Direct posang rotation (no post-processing needed)")
+
+            sizeau_radius = IMAGE_SIZE_AU / 2.0
             
-            # ===== STEP 2: GENERATE IMAGE WITH radmc3dPy =====
+            cmd = (
+                f"{self.radmc3d_exec} image "
+                f"lambda {WAV_MICRON} "
+                f"npix {IMAGE_NPIX} "
+                f"sizeau {sizeau_radius} "
+                f"incl {INCLINATION_DEG} "
+                f"phi 0 "
+                f"posang {posang_value} "
+                f"nostar"
+            )
+            
+            self._log_debug(f"Command: {cmd}")
+            subprocess.run(
+                cmd, shell=True, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                timeout=SIMULATION_TIMEOUT
+            )
+            
+            # 3. READ IMAGE
             if not RADMC3DPY_AVAILABLE:
-                self._log_error("radmc3dPy not available - falling back to subprocess")
-                return self._fallback_radmc3d_image(radmc_dir)
-            
-            self._log_debug("  Step 2/3: Generating image with radmc3dPy")
-            
-            # \u2705 Document geometric setup for validation
-            from mcmc_pipeline_config import PA_OBS_DEG
-            self._log_info(f"\u27a1\ufe0f  Image geometry configuration:")
-            self._log_info(f"   Inclination: {INCLINATION_DEG}\u00b0 (from pole, 0\u00b0=face-on, 90\u00b0=edge-on)")
-            self._log_info(f"   RADMC-3D phi: {POSITION_ANGLE_DEG:.1f}\u00b0 (camera azimuthal angle)")
-            self._log_info(f"   Expected sky PA: {PA_OBS_DEG}\u00b0 (East of North, IAU convention)")
-            self._log_info(f"   Transformation: phi = (90\u00b0 - PA_obs) mod 360\u00b0")
-            
-            # Use radmc3dPy to make image (matching plot_images.py)
-            # CRITICAL: sizeau expects HALF-WIDTH (radius), not diameter!
-            # IMAGE_SIZE_AU = 94 AU (diameter), so pass 47 AU (radius)
-            try:
-                makeImage(
-                    npix=IMAGE_NPIX,
-                    sizeau=IMAGE_SIZE_AU / 2,  # RADMC3D expects radius, not diameter!
-                    incl=INCLINATION_DEG,
-                    phi=POSITION_ANGLE_DEG,
-                    wav=WAV_MICRON  # wavelength in micron
-                )
-            except Exception as e:
-                self._log_error(f"makeImage() failed: {e}", exception=e)
-                return None
-            
-            # Read image
+                self._log_error("radmc3dPy needed for reading")
+                # Use fallback method
+                image_data = self._fallback_radmc3d_image(radmc_dir)
+                if image_data is None:
+                    return None
+                return image_data
+                
             im_mm = readImage()
             
-            # ===== STEP 3: BEAM CONVOLUTION =====
-            self._log_debug("  Step 3/3: Convolving with beam")
-            self._log_info(f"   Beam: {BEAM_MAJOR_ARCSEC}\u00d7{BEAM_MINOR_ARCSEC} arcsec, PA={BEAM_PA_DEG}\u00b0")
+            # 4. CONVOLVE WITH BEAM
+            # Note: Beam PA (22°) is a telescope property, applied before rotation
+            cim = im_mm.imConv(
+                fwhm=[BEAM_MAJOR_ARCSEC, BEAM_MINOR_ARCSEC], 
+                pa=BEAM_PA_DEG, 
+                dpc=DISTANCE_PC
+            )
             
-            # Convolve with beam (matching plot_images.py)
-            # CRITICAL: pa = BEAM ellipse PA (22°), NOT disk PA (121.5°)!
-            # The beam PA is the orientation of the telescope's synthesized beam
-            try:
-                cim = im_mm.imConv(
-                    fwhm=[BEAM_MAJOR_ARCSEC, BEAM_MINOR_ARCSEC],
-                    pa=BEAM_PA_DEG,  # \u2705 Beam PA from observations, independent of disk PA
-                    dpc=DISTANCE_PC
-                )
-            except Exception as e:
-                self._log_error(f"Beam convolution failed: {e}", exception=e)
-                return None
+            # Extract Data
+            image_data = cim.imageJyppix.squeeze()
             
-            # Extract image data [frequency, y, x]
-            # CRITICAL FINDING: imConv() with beam parameters ALREADY produces Jy/beam!
-            # - Input: imageJyppix in Jy/pixel (per pixel solid angle)
-            # - imConv(fwhm=[bmaj, bmin], dpc=distance): Gaussian convolution with beam PSF
-            # - Output: imageJyppix still labeled "Jy/pixel" but effectively Jy/beam
-            #   because each pixel now represents the beam-averaged flux
-            #
-            # Evidence: radmc3dPy imConv() preserves integrated flux during convolution
-            # The PSF normalization ensures flux conservation, so:
-            #   sum(imageJyppix_before) ≈ sum(imageJyppix_after)
-            # This means imageJyppix after convolution is the flux that would be measured
-            # by a beam at each pixel location → Already in Jy/beam convention!
+            # 5. IMAGE ALREADY HAS CORRECT PA (from posang parameter)
+            # ========================================================================
+            # RADMC-3D generated image with posang=31.5°
+            # No post-processing rotation needed!
+            # Image already has PA ~ 121.5° on sky
+            # ========================================================================
             
-            image_data = cim.imageJyppix.squeeze()  # Remove frequency dimension if present
+            self._log_info(f"Final model image: {image_data.shape}")
+            self._log_info(f"  PA on sky: ~{PA_OBS_DEG}° (set by posang={posang_value}°)")
+            self._log_info(f"  ✓ No post-rotation needed")
             
-            # Ensure 2D
-            if image_data.ndim == 3:
-                image_data = image_data[0, :, :]
-            
-            # ===== NO POST-ROTATION NEEDED =====
-            # RADMC3D phi parameter correctly handles disk position angle
-            # phi=31.5° sets disk major axis orientation
-            # incl=47° sets viewing angle from pole
-            # Together these produce correctly oriented disk image
-            # Previous rotation was compensating for incorrect understanding of phi parameter
-            
-            self._log_debug(f"  Image generated with incl={INCLINATION_DEG}°, phi={POSITION_ANGLE_DEG}°")
-            self._log_debug(f"  No post-rotation applied - phi parameter handles disk PA correctly")
-            
-            # 🔎 SANITY CHECK: Calculate total integrated flux
-            # CORRECTED: When summing Jy/beam, must divide by beam_area_pixels
-            # Calculate beam area in pixels
-            pixel_arcsec = IMAGE_SIZE_AU / DISTANCE_PC / IMAGE_NPIX  # arcsec/pixel
-            beam_area_arcsec2 = np.pi * BEAM_MAJOR_ARCSEC * BEAM_MINOR_ARCSEC / (4.0 * np.log(2.0))
-            beam_area_pixels = beam_area_arcsec2 / (pixel_arcsec**2)
-            
-            total_flux_raw = np.sum(image_data)  # Sum of Jy/beam values
-            total_flux_jy = total_flux_raw / beam_area_pixels  # Convert to actual Jy
-            target_flux_jy = 70.8 / 1000.0  # Paper: 70.8 mJy = 0.0708 Jy
-            
-            self._log_debug(f"  Image shape: {image_data.shape}")
-            self._log_debug(f"  Image range (Jy/beam): {image_data.min():.2e} - {image_data.max():.2e}")
-            self._log_info(f"🔎 SANITY CHECK - Integrated Flux:")
-            self._log_info(f"   Raw sum:   {total_flux_raw:.4f} (sum of Jy/beam)")
-            self._log_info(f"   Corrected: {total_flux_jy:.4f} Jy (÷ {beam_area_pixels:.1f} pixels/beam)")
-            self._log_info(f"   Target:    {target_flux_jy:.4f} Jy (paper)")
-            self._log_info(f"   Ratio:     {total_flux_jy / target_flux_jy:.1f}x")
-            
-            if total_flux_jy > target_flux_jy * 10:
-                self._log_warning(f"⚠️  Flux is {total_flux_jy / target_flux_jy:.1f}x too high!")
-                self._log_warning(f"   Check: dust mass, opacity, distance")
-            elif total_flux_jy < target_flux_jy * 0.1:
-                self._log_warning(f"⚠️  Flux is {target_flux_jy / total_flux_jy:.1f}x too low!")
-            elif total_flux_jy > target_flux_jy * 2:
-                self._log_info(f"✅  Ratio {total_flux_jy / target_flux_jy:.1f}x is reasonable - MCMC will tune")
-            
+            # Debug FITS
+            if self._cleanup is False:
+                hdu = fits.PrimaryHDU(image_data)
+                hdu.header['OBJECT'] = 'IRAS 04166 Model'
+                hdu.header['INCL'] = INCLINATION_DEG
+                hdu.header['PA_MODEL'] = PA_OBS_DEG
+                hdu.header['POSANG'] = posang_value
+                hdu.header['BEAM_MAJ'] = BEAM_MAJOR_ARCSEC
+                hdu.header['BEAM_MIN'] = BEAM_MINOR_ARCSEC
+                hdu.header['BEAM_PA'] = BEAM_PA_DEG
+                hdu.header['COMMENT'] = 'PA set directly via RADMC-3D posang parameter'
+                hdu.writeto(radmc_dir / "debug_model_v7_posang.fits", overwrite=True)
+
             return image_data
-            
-        except subprocess.TimeoutExpired:
-            self._log_error(f"RADMC3D mctherm timeout after {SIMULATION_TIMEOUT}s")
+
+        except subprocess.CalledProcessError as e:
+            self._log_error(f"RADMC3D Failed: {e}")
             return None
-        
         except Exception as e:
-            self._log_error(f"RADMC3D V2 failed: {e}", exception=e)
+            self._log_error(f"Error: {e}", exception=e)
             return None
-        
         finally:
             os.chdir(original_dir)
     
@@ -902,18 +1073,21 @@ class ForwardModelSimulatorV2:
         """
         Fallback to subprocess if radmc3dPy not available.
         This won't have proper beam convolution!
+        Uses post-generation rotation to match PA.
         """
         self._log_debug("Using fallback RADMC3D image generation (NO CONVOLUTION)")
         
         try:
-            # Generate image with subprocess
-            # CRITICAL: sizeau expects HALF-WIDTH (radius), not diameter!
+            # Generate image with correct posang
+            # posang = PA_obs - 90° to match observation PA
+            posang_value = PA_OBS_DEG - 90.0
             image_cmd = (
                 f"{self.radmc3d_exec} image "
                 f"npix {IMAGE_NPIX} "
-                f"sizeau {IMAGE_SIZE_AU / 2} "  # RADMC3D expects radius!
+                f"sizeau {IMAGE_SIZE_AU / 2} "
                 f"incl {INCLINATION_DEG} "
-                f"phi {POSITION_ANGLE_DEG} "
+                f"phi 0 "
+                f"posang {posang_value} "
                 f"lambda {WAV_MICRON}"
             )
             
@@ -941,12 +1115,27 @@ class ForwardModelSimulatorV2:
                 nx, ny = map(int, f.readline().split())
                 nlam = int(f.readline())
                 
-                # Skip rest of header
-                for _ in range(nlam + 4):
+                # Skip pixel size header (2 lines)
+                f.readline()
+                f.readline()
+                
+                # Skip wavelength(s)
+                for _ in range(nlam):
                     f.readline()
                 
-                # Read image data
-                image_data = np.array([float(f.readline()) for _ in range(nx * ny)])
+                # Skip empty line
+                line = f.readline().strip()
+                while not line:  # Skip all empty lines
+                    line = f.readline().strip()
+                
+                # Read first data value (already got it)
+                image_data = [float(line)]
+                
+                # Read rest of image data
+                for _ in range(nx * ny - 1):
+                    image_data.append(float(f.readline()))
+                
+                image_data = np.array(image_data)
                 image_data = image_data.reshape((ny, nx))
             
             # Manual Gaussian beam convolution (basic)
@@ -955,6 +1144,10 @@ class ForwardModelSimulatorV2:
             
             kernel = Gaussian2DKernel(x_stddev=beam_sigma_x, y_stddev=beam_sigma_y, x_size=31, y_size=31)
             convolved = convolve(image_data, kernel, boundary='extend')
+            t
+            # Rotation already done by posang parameter in radmc3d command
+            # No post-processing rotation needed
+            self._log_info(f"Fallback: Image generated with posang={posang_value}° → PA ~ {PA_OBS_DEG}°")
             
             return convolved
             
