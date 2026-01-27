@@ -25,6 +25,13 @@ import json
 from tqdm import tqdm
 import multiprocessing as mp
 
+# ⚠️ CRITICAL: Set spawn context to avoid deadlocks
+# forkserver can cause queue deadlocks with large objects
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
+
 try:
     from mcmc_pipeline_config import *
     from mcmc_logger import get_logger
@@ -124,6 +131,12 @@ class MCMCSampler:
             If True, reset backend (start fresh)
             If False, resume from existing file
         """
+        if reset and self.backend_path.exists():
+            # Delete old file to ensure clean start
+            self.backend_path.unlink()
+            if self.logger:
+                self.logger.info(f"🗑️  Deleted old backend file: {self.backend_path}")
+        
         self.backend = emcee.backends.HDFBackend(str(self.backend_path))
         
         if reset or not self.backend_path.exists():
@@ -142,9 +155,11 @@ class MCMCSampler:
         """Initialize emcee sampler with HDF5 backend."""
         if self.use_parallel:
             if self.pool is None:
-                self.pool = mp.Pool(self.n_processes)
+                # Use context manager to ensure proper cleanup
+                ctx = mp.get_context('spawn')
+                self.pool = ctx.Pool(self.n_processes, maxtasksperchild=1)
                 if self.logger:
-                    self.logger.info(f"Initialized multiprocessing pool: {self.n_processes} workers")
+                    self.logger.info(f"Initialized multiprocessing pool: {self.n_processes} workers (spawn context, maxtasksperchild=1)")
             
             self.sampler = emcee.EnsembleSampler(
                 self.n_walkers,
@@ -248,14 +263,34 @@ class MCMCSampler:
         
         start_time = time.time()
         last_log_time = start_time
+        last_step_time = start_time  # Track time of last completed step
         
         # ═══════════════════════════════════════════════════════════
         # MAIN SAMPLING LOOP - HDF5 Backend handles all storage!
         # ═══════════════════════════════════════════════════════════
         
         step_count = 0
+        step_timeout = 18000  # 5 hour timeout per step (very generous for slow VMs)
+        
         for sample in self.sampler.sample(state, iterations=n_steps_to_run, progress=False):
             step_count += 1
+            current_step_time = time.time()
+            
+            # Watchdog: Detect stuck iterations
+            step_duration = current_step_time - last_step_time
+            if step_duration > step_timeout:
+                if self.logger:
+                    self.logger.error(f"⚠️ WATCHDOG: Step took {step_duration/60:.1f} min (>{step_timeout/60:.0f} min timeout)")
+                    self.logger.error(f"   This indicates a deadlock. Attempting graceful exit...")
+                # Save what we have and exit
+                if show_progress:
+                    pbar.close()
+                if self.pool:
+                    self.pool.terminate()
+                    self.pool.join()
+                raise RuntimeError(f"MCMC step timeout after {step_duration/60:.1f} minutes")
+            
+            last_step_time = current_step_time
             
             # Track best fit (lightweight - only read last step's log_prob)
             current_log_probs = self.backend.get_log_prob()[:, -1]  # Last step only
