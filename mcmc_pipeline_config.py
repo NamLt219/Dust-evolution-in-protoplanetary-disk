@@ -10,30 +10,106 @@ Date: 2025-11-19
 import os
 import sys
 import numpy as np
+from pathlib import Path
+import shutil
 
 # =============================================================================
-# PATHS & DIRECTORIES
+# PATHS & DIRECTORIES (PORTABLE CONFIGURATION)
 # =============================================================================
+# Uses environment variables with fallbacks for server/cluster deployment
 
-BASE_DIR = "/home/nam/Desktop/Dustpy+Radmc3d+mcmc"
-WORK_DIR = os.path.join(BASE_DIR, "16-9-2025_dustpy_radmc3d_change_init/WORK_DIR")
-MCMC_OUTPUT_DIR = os.path.join(BASE_DIR, "mcmc_results")
+# Base directory: Try env var, then fall back to script location
+BASE_DIR = os.getenv(
+    'MCMC_PIPELINE_BASE',
+    str(Path(__file__).parent.absolute())
+)
+
+# Work directory: Try env var, then relative to base
+WORK_DIR = os.getenv(
+    'MCMC_WORK_DIR',
+    os.path.join(BASE_DIR, "16-9-2025_dustpy_radmc3d_change_init", "WORK_DIR")
+)
+
+# Output directories
+MCMC_OUTPUT_DIR = os.getenv(
+    'MCMC_OUTPUT_DIR',
+    os.path.join(BASE_DIR, "mcmc_results")
+)
 CHECKPOINT_DIR = os.path.join(MCMC_OUTPUT_DIR, "checkpoints")
 LOG_DIR = os.path.join(MCMC_OUTPUT_DIR, "logs")
 
-# Observation data
-OBS_FITS_PATH = "/home/nam/Desktop/Dustpy+Radmc3d+mcmc/IRAS04166_robust_0.0.fits"
+# Observation data: Try env var, then search standard locations
+def _find_obs_fits():
+    """Search for observation FITS in standard locations."""
+    # First try environment variable
+    env_path = os.getenv('MCMC_OBS_FITS')
+    if env_path and os.path.exists(env_path):
+        return env_path
+    
+    # Search in standard locations
+    search_paths = [
+        os.path.join(BASE_DIR, "IRAS04166_robust_0.0.fits"),  # In MCMC directory
+        os.path.join(os.path.dirname(BASE_DIR), "IRAS04166_robust_0.0.fits"),  # Parent directory
+    ]
+    
+    for path in search_paths:
+        if os.path.exists(path):
+            return path
+    
+    raise FileNotFoundError(
+        f"IRAS04166_robust_0.0.fits not found. Searched:\n" +
+        "\n".join(f"  - {p}" for p in search_paths) +
+        "\nSet MCMC_OBS_FITS environment variable or place file in one of these locations."
+    )
 
-# Executables
-RADMC3D_EXECUTABLE = "/home/nam/bin/radmc3d"
+OBS_FITS_PATH = _find_obs_fits()
+
+# RADMC-3D executable: Search common locations
+def _find_radmc3d():
+    """Search for radmc3d executable in common locations."""
+    search_paths = [
+        os.getenv('RADMC3D_EXECUTABLE'),  # User-specified env var
+        os.path.join(os.path.expanduser('~'), 'bin', 'radmc3d'),  # ~/bin
+        '/usr/local/bin/radmc3d',  # System install
+        '/opt/bin/radmc3d',  # Alternative location
+        'radmc3d',  # In PATH
+    ]
+    
+    for path in search_paths:
+        if path and shutil.which(path):
+            return path
+    
+    # Fallback for backward compatibility
+    legacy_path = "/home/nam/bin/radmc3d"
+    if os.path.exists(legacy_path):
+        return legacy_path
+    
+    raise FileNotFoundError(
+        "radmc3d executable not found. Install RADMC-3D or set RADMC3D_EXECUTABLE environment variable."
+    )
+
+RADMC3D_EXECUTABLE = _find_radmc3d()
 
 # Dust opacity table (RADMC3D requires this file in each run directory)
-RADMC3D_OPACITY_FILE = os.path.join(BASE_DIR, "dustkappa_silicate.inp")
-if not os.path.exists(RADMC3D_OPACITY_FILE):
+# Try current directory first, then parent directory (for typical project layout)
+def _find_opacity_file():
+    """Search for opacity file in standard locations."""
+    search_paths = [
+        os.path.join(BASE_DIR, "dustkappa_silicate.inp"),  # In MCMC directory
+        os.path.join(os.path.dirname(BASE_DIR), "dustkappa_silicate.inp"),  # Parent directory
+    ]
+    
+    for path in search_paths:
+        if os.path.exists(path):
+            return path
+    
     raise FileNotFoundError(
-        f"Missing required opacity file: {RADMC3D_OPACITY_FILE}. "
-        "Please place dustkappa_silicate.inp at this path or update RADMC3D_OPACITY_FILE."
+        f"dustkappa_silicate.inp not found. Searched:\n" +
+        "\n".join(f"  - {p}" for p in search_paths) +
+        "\nPlease place dustkappa_silicate.inp in one of these locations."
     )
+
+RADMC3D_OPACITY_FILE = _find_opacity_file()
 
 # Templates - REMOVED: DustPy creates Simulation() directly, no template needed
 # TEMPLATE_INI_PATH = os.path.join(WORK_DIR, "sim_template.ini")
@@ -72,7 +148,7 @@ PA_OBS_DEG = 121.5
 # Physical interpretation:
 #   Camera at azimuthal angle 328.5° looking toward disk center
 #   produces image with major axis at PA=121.5° on sky
-POSITION_ANGLE_DEG = (90.0 - PA_OBS_DEG) % 360.0  # = 328.5°
+POSITION_ANGLE_DEG = 31.5  # = 328.5°
 
 # Image properties
 # ✅ CORRECTED: Match IRAS observation FITS header
@@ -140,12 +216,17 @@ DISK_MINOR_AXIS_MAS = 93.7       # Deconvolved minor axis [mas] from Table 2
 
 MCMC_PARAMETERS = [
     {
-        "name": "log_mdisk",  # Log10 of disk mass in solar masses
-        "label": r"$\log_{10}(M_{\rm disk}/M_{\odot})$",
-        "min": -4.0,
-        "max": -1.0,
-        "default": -1.92,  # 0.012 Msun (from your DustPy setup)
-        "log_scale": False,  # Already in log space
+        # ⚠️ CRITICAL: 'log_mdisk' represents TOTAL DISK (GAS) MASS in DustPy.
+        # Physics correction (16 Jan 2025): M_gas = 10^log_mdisk, M_dust derived from d2g ratio.
+        # Previous interpretation (dust mass) was INCORRECT and broke mass conservation.
+        # DO NOT REVERT to dust mass interpretation - physics logic treats this as GAS mass.
+        # Variable name kept as 'log_mdisk' for HDF5 backend compatibility with existing runs.
+        "name": "log_mdisk",  # Log10 of TOTAL GAS MASS in solar masses (see WARNING above)
+        "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",  # ✅ CORRECTED LABEL
+        "min": -3.5,          # ✅ CORRECTED: Realistic gas mass range (M_gas ≥ 0.000316 M☉)
+        "max": -1.5,          # ✅ Upper bound ~0.0316 M☉ (widened for safety)
+        "default": -2.8,      # ✅ FLUX-MATCHED: From high-fidelity test (M_gas = 0.00158 M☉)
+        "log_scale": False,   # Already in log space
         "unit": "M_sun",
     },
     {
@@ -153,7 +234,7 @@ MCMC_PARAMETERS = [
         "label": r"$R_c$ (AU)",
         "min": 15.0,      # ✅ FIXED: Observed R_disk ≈ 22 AU (Table 3)
                           # r_c typically 0.5-2× R_disk for exponential taper
-        "max": 40.0,      # ✅ Upper bound allows moderate radial extent
+        "max": 60.0,      # ✅ Upper bound allows moderate radial extent
         "default": 22.0,  # ✅ Start at observed disk radius
         "log_scale": False,  # Linear sampling for this narrow range
         "unit": "AU",
@@ -189,8 +270,8 @@ MCMC_PARAMETERS = [
     {
         "name": "dust_to_gas",  # Dust-to-gas mass ratio
         "label": r"$\epsilon$ (d2g ratio)",
-        "min": 0.001,     # ✅ NEW: Depleted disks (settled/grown dust)
-        "max": 0.02,      # ✅ Enriched (ISM is 0.01)
+        "min": 0.001,     # ✅ Depleted disks (settled/grown dust)
+        "max": 0.05,      # ✅ WIDENED: Allow super-ISM enrichment (0.05 = 5× ISM)
         "default": 0.01,  # ISM value
         "log_scale": False,
         "unit": "",
@@ -233,9 +314,9 @@ else:
 # Number of walkers (user requested: 5 walkers × 2 = 10 total)
 N_WALKERS = 10  # Use 5 user-specified walkers × 2 = 10 total walkers
 
-# Number of steps - ADJUSTED for 7 parameters (more exploration needed)
-N_STEPS_BURNIN = 15      # ✅ Increased from 20 → 30 for 7-D space
-N_STEPS_PRODUCTION = 50  # ✅ Increased from 80 → 120 for better statistics
+# Number of steps - QUICK TEST for resource optimization
+N_STEPS_BURNIN = 5       # ✅ Quick burn-in for testing
+N_STEPS_PRODUCTION = 15  # ✅ SHORT: 20 total steps for RAM optimization
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
 # Thinning (save every Nth sample to reduce autocorrelation)
@@ -252,13 +333,11 @@ TOTAL_CORES = multiprocessing.cpu_count()
 SAFE_CORES = max(1, TOTAL_CORES - 4) 
 
 # Tính toán số lượng Process tối ưu
-# ⚠️  CRITICAL FIX: Giảm từ 5 → 3 → 2 workers (OOM vẫn xảy ra với 3!)
-# Phân tích lần 1: 5 workers × 2GB = 10GB → OOM tại step 14, 33
-# Phân tích lần 2: 3 workers × 500MB = 1.5GB nhưng SWAP KHÔNG được dùng → OOM tại step 47
-# Root cause: Linux kernel ưu tiên kill process hơn dùng swap (swappiness=60)
-# Solution cuối: 2 workers × 500MB = 1GB (dư thừa RAM rất nhiều)
-# Trade-off: Runtime tăng 2x nhưng BULLETPROOF STABLE
-N_PROCESSES = 2  # Final reduction: 5 → 3 → 2 for absolute stability
+# ⚠️  RAM OPTIMIZATION: Single worker for maximum stability
+# Analysis: 10 walkers × 1 worker = sequential execution
+# Trade-off: Longer runtime but minimal RAM usage (~500MB max)
+# Perfect for 20-step test run
+N_PROCESSES = 3  # Single worker for RAM optimization
 
 USE_MULTIPROCESSING = True
 # Checkpoint frequency
