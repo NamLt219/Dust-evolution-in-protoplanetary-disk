@@ -1031,13 +1031,14 @@ class ForwardModelSimulatorV2:
             self._log_info(f"  posang: {posang_value}° (to get PA={PA_OBS_DEG}° on sky)")
             self._log_info(f"  → Direct posang rotation (no post-processing needed)")
 
+            # Calculate FOV radius (needed for both validation and RADMC-3D command)
+            sizeau_radius = IMAGE_SIZE_AU / 2.0  # FOV radius [AU]
+
             # ===== NEW: CRITICAL VALIDATION =====
             # Read rout from amr_grid.inp to ensure FOV encompasses full disk
             try:
                 rout = self._read_rout_from_grid(radmc_dir)  # in [cm]
                 rout_au = rout / au
-                
-                sizeau_radius = IMAGE_SIZE_AU / 2.0  # FOV radius [AU]
                 
                 # Check for disk truncation
                 coverage_ratio = sizeau_radius / rout_au
@@ -1070,8 +1071,6 @@ class ForwardModelSimulatorV2:
             except FileNotFoundError:
                 self._log_warning("Cannot validate FOV - amr_grid.inp not found (will proceed anyway)")
             # ===== END VALIDATION =====
-
-            sizeau_radius = IMAGE_SIZE_AU / 2.0
             
             cmd = (
                 f"{self.radmc3d_exec} image "
