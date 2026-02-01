@@ -908,6 +908,45 @@ class ForwardModelSimulatorV2:
         
         self._log_debug(f"RADMC3D input files created in {radmc_dir} (nphot={nphot})")
     
+    def _read_rout_from_grid(self, radmc_dir: Path) -> float:
+        """
+        Read outer grid radius from amr_grid.inp.
+        
+        Returns
+        -------
+        rout : float
+            Outer radius of RADMC-3D grid [cm]
+        
+        Raises
+        ------
+        FileNotFoundError
+            If amr_grid.inp does not exist
+        """
+        grid_file = radmc_dir / "amr_grid.inp"
+        
+        with open(grid_file, 'r') as f:
+            # Parse header
+            iformat = int(f.readline())          # Line 1: format
+            amr_style = int(f.readline())        # Line 2: AMR style
+            coord_sys = int(f.readline())        # Line 3: coordinate system
+            gridinfo = int(f.readline())         # Line 4: grid info
+            incl_dims = f.readline().split()     # Line 5: include r,theta,phi
+            
+            # Read grid dimensions
+            dims = f.readline().split()          # Line 6: nr, ntheta, nphi
+            nr = int(dims[0])
+            
+            # Read radial grid interfaces
+            ri = []
+            for i in range(nr + 1):
+                ri.append(float(f.readline()))
+            
+            rout = ri[-1]  # Outer radius [cm]
+        
+        self._log_debug(f"Read from amr_grid.inp: rout = {rout/au:.2f} AU (nr={nr})")
+        
+        return rout
+    
     def _run_radmc3d_v2(self, radmc_dir: Path, params: Dict[str, float]) -> Optional[np.ndarray]:
         """
         Run RADMC3D V6 - SCIENTIFICALLY CORRECT ANGLE HANDLING.
@@ -992,7 +1031,46 @@ class ForwardModelSimulatorV2:
             self._log_info(f"  posang: {posang_value}° (to get PA={PA_OBS_DEG}° on sky)")
             self._log_info(f"  → Direct posang rotation (no post-processing needed)")
 
-            sizeau_radius = IMAGE_SIZE_AU / 2.0
+            # Calculate FOV radius (needed for both validation and RADMC-3D command)
+            sizeau_radius = IMAGE_SIZE_AU / 2.0  # FOV radius [AU]
+
+            # ===== NEW: CRITICAL VALIDATION =====
+            # Read rout from amr_grid.inp to ensure FOV encompasses full disk
+            try:
+                rout = self._read_rout_from_grid(radmc_dir)  # in [cm]
+                rout_au = rout / au
+                
+                # Check for disk truncation
+                coverage_ratio = sizeau_radius / rout_au
+                
+                if coverage_ratio < 1.0:
+                    # CRITICAL ERROR - cutting disk!
+                    raise ValueError(
+                        f"🚨 CRITICAL: Field of View ({sizeau_radius:.1f} AU) is SMALLER than "
+                        f"grid outer radius ({rout_au:.1f} AU)!\n"
+                        f"This will cut {(1 - coverage_ratio)*100:.0f}% of the disk mass.\n"
+                        f"Fix: Increase IMAGE_SIZE_AU in config to at least {2.2 * rout_au:.0f} AU"
+                    )
+                
+                elif coverage_ratio < 1.2:
+                    # WARNING - insufficient margin
+                    self._log_warning(
+                        f"⚠️  Field of View ({sizeau_radius:.1f} AU) has only "
+                        f"{(coverage_ratio - 1)*100:.0f}% margin beyond grid ({rout_au:.1f} AU). "
+                        f"Recommend IMAGE_SIZE_AU ≥ {2.5 * rout_au:.0f} AU to avoid edge effects."
+                    )
+                
+                else:
+                    # OK
+                    self._log_info(
+                        f"✓ FOV validation passed: "
+                        f"sizeau={sizeau_radius:.1f} AU, rout={rout_au:.1f} AU "
+                        f"(margin={(coverage_ratio-1)*100:.0f}%)"
+                    )
+            
+            except FileNotFoundError:
+                self._log_warning("Cannot validate FOV - amr_grid.inp not found (will proceed anyway)")
+            # ===== END VALIDATION =====
             
             cmd = (
                 f"{self.radmc3d_exec} image "
