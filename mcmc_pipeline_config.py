@@ -151,13 +151,25 @@ PA_OBS_DEG = 121.5
 POSITION_ANGLE_DEG = 31.5  # = 328.5°
 
 # Image properties
-# ✅ CORRECTED: Match IRAS observation FITS header
-# CDELT1 = 8.33e-7 deg/pixel = 3 mas/pixel → 201 pixels = 603 mas = 0.603 arcsec
-# At 156 pc: 0.603 arcsec = 94.068 AU
+# ========== IMAGE PARAMETERS (FIXED) ==========
+# Scientific justification:
+#   - Dynamic grid boundary rout ~ 70-100 AU (from DustPy)
+#   - Need margin: FOV ≥ 1.5 × rout_max for safety
+#   - Recommended: FOV = 2.5 × rout_max to avoid edge effects
+#
+# Calculation:
+#   rout_max ≈ 100 AU (observed from logs)
+#   → IMAGE_SIZE_AU = 2.5 × 100 = 250 AU
+#
+# Impact on pixel scale:
+#   Old: 94 AU / 201 pixels = 0.47 AU/pixel
+#   New: 250 AU / 201 pixels = 1.24 AU/pixel
+#   (Still sufficient for 1.3mm ALMA beam ~10-15 AU)
+#
 # CRITICAL: IMAGE_SIZE_AU stores the FULL FOV DIAMETER (total width of image)
 # RADMC3D's "sizeau" parameter expects HALF-WIDTH (radius: -sizeau to +sizeau)
 # → Must pass IMAGE_SIZE_AU/2 to RADMC3D to get correct FOV!
-IMAGE_SIZE_AU = 94.0  # Field of View DIAMETER in AU (total width, MUST match FITS!)
+IMAGE_SIZE_AU = 250.0  # [AU] - INCREASED from 94.0 to prevent disk truncation
 NPIX = 201  # Number of pixels (201×201)
 IMAGE_NPIX = NPIX  # Alias for compatibility
 WAV_MICRON = 1300.0  # Observation wavelength in microns
