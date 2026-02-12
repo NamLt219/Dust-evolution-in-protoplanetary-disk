@@ -114,7 +114,8 @@ class MCMCPipeline:
                 roi_radius_pixels=None,
                 beam_major_arcsec=BEAM_MAJOR_ARCSEC,  # From config
                 beam_minor_arcsec=BEAM_MINOR_ARCSEC,  # From config
-                pixel_scale_arcsec=pixel_scale_arcsec
+                pixel_scale_arcsec=pixel_scale_arcsec,
+                align_centers=True  # ✅ CENTERING CORRECTION - aligns model to obs peak
             )
             
             self.prior = PriorEvaluator(MCMC_PARAMETERS)
