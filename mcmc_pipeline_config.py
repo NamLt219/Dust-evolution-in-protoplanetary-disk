@@ -132,7 +132,9 @@ INCLINATION_DEG = 47.0  # Disk inclination in degrees (from cos⁻¹(94/138))
 # ═══════════════════════════════════════════════════════════════════════════
 # Observed PA (astronomical): 121.5° ± 0.4° (Table 3, Phuong+2025)
 # Measured counter-clockwise from North toward East (IAU convention)
-PA_OBS_DEG = 121.5
+# ⚠️ DIAGNOSTIC FIX (2026-02-11): Model was 11.8° too clockwise
+#    Adjusted PA to compensate for coordinate transformation
+PA_OBS_DEG = 133.3  # Was 121.5, adjusted by +11.8° from butterfly diagnostic
 
 # RADMC-3D phi parameter conversion:
 # The makeImage(phi=φ) parameter rotates the CAMERA azimuthally, NOT the disk.
@@ -157,7 +159,8 @@ POSITION_ANGLE_DEG = 31.5  # = 328.5°
 # CRITICAL: IMAGE_SIZE_AU stores the FULL FOV DIAMETER (total width of image)
 # RADMC3D's "sizeau" parameter expects HALF-WIDTH (radius: -sizeau to +sizeau)
 # → Must pass IMAGE_SIZE_AU/2 to RADMC3D to get correct FOV!
-IMAGE_SIZE_AU = 94.0  # Field of View DIAMETER in AU (total width, MUST match FITS!)
+# Note: Edge flux clipping ~1.5% is acceptable for r_c ~ 20 AU disk
+IMAGE_SIZE_AU = 94.0  # MUST match observation FOV for direct pixel comparison
 NPIX = 201  # Number of pixels (201×201)
 IMAGE_NPIX = NPIX  # Alias for compatibility
 WAV_MICRON = 1300.0  # Observation wavelength in microns
@@ -232,10 +235,9 @@ MCMC_PARAMETERS = [
     {
         "name": "r_c",  # Characteristic radius in AU
         "label": r"$R_c$ (AU)",
-        "min": 15.0,      # ✅ FIXED: Observed R_disk ≈ 22 AU (Table 3)
-                          # r_c typically 0.5-2× R_disk for exponential taper
-        "max": 60.0,      # ✅ Upper bound allows moderate radial extent
-        "default": 22.0,  # ✅ Start at observed disk radius
+        "min": 10.0,      # ✅ PILOT RUN: Allow compact disks
+        "max": 50.0,      # ✅ PILOT RUN: Wide range to explore
+        "default": 20.0,  # ✅ PILOT RUN: Near observed disk size
         "log_scale": False,  # Linear sampling for this narrow range
         "unit": "AU",
     },
@@ -249,13 +251,17 @@ MCMC_PARAMETERS = [
         "unit": "cm/s",
     },
     {
-        "name": "sigma_exp",  # Surface density power-law exponent
-        "label": r"$p$ (Σ exponent)",
-        "min": 0.5,       # ✅ NEW PARAMETER: Allow variation in Σ profile shape
-        "max": 1.5,       # ✅ Typical range for protoplanetary disks
-        "default": 1.0,   # Standard value used in tests
+        "name": "sigma_exp",  # Surface density power-law exponent (γ)
+        "label": r"$\gamma$ (Σ exponent)",
+        "min": 0.5,       # ✅ PILOT RUN: Allow steep profiles
+        "max": 2.5,       # ✅ PILOT RUN: Wide range to explore parameter space
+        "default": 1.6,   # ✅ PILOT RUN: Start near sweet spot
         "log_scale": False,
         "unit": "",
+        # PILOT RUN STRATEGY (2026-01-31):
+        # - Range [0.5, 2.5] allows full exploration of steep vs flat profiles
+        # - Default 1.6 starts near sweet spot identified in refinement runs
+        # - 100 steps will identify optimal range for subsequent focused runs
     },
     # ❌ REMOVED: sigma_rc parameter (redundant with r_c, causes degeneracy)
     # {
@@ -315,8 +321,8 @@ else:
 N_WALKERS = 10  # Use 5 user-specified walkers × 2 = 10 total walkers
 
 # Number of steps - QUICK TEST for resource optimization
-N_STEPS_BURNIN = 5       # ✅ Quick burn-in for testing
-N_STEPS_PRODUCTION = 15  # ✅ SHORT: 20 total steps for RAM optimization
+N_STEPS_BURNIN = 60       # ✅ Quick burn-in for testing
+N_STEPS_PRODUCTION = 300  # ✅ SHORT: 20 total steps for RAM optimization
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
 # Thinning (save every Nth sample to reduce autocorrelation)
@@ -359,20 +365,8 @@ MASK_THRESHOLD_SIGMA = 3.0  # Only fit pixels above N*sigma in observation
 # Prior types: "uniform", "gaussian", "log-uniform"
 PRIOR_TYPE = "uniform"  # Default uniform priors within bounds
 
-# ✅ OPTIMIZED: Custom priors based on test results (χ²_red = 1.77 excellent!)
-# Format: {"param_name": {"type": "gaussian", "mean": float, "std": float}}
-CUSTOM_PRIORS = {
-    # ✅ Constrain r_c based on disk size mismatch analysis:
-    # Test shows model disk 1.36× larger than IRAS → need smaller r_c
-    # r_c=45 AU gave same χ² as 60 AU, suggesting r_c around 40-50 AU optimal
-    "r_c": {"type": "gaussian", "mean": 45.0, "std": 10.0},  # Soft constraint
-    
-    # ✅ Dust-to-gas - ISM value as reference
-    "dust_to_gas": {"type": "gaussian", "mean": 0.01, "std": 0.005},  # Allow depletion
-    
-    # ❌ REMOVED: sigma_rc (redundant parameter)
-    # "sigma_rc": {"type": "gaussian", "mean": 1.0, "std": 0.1},
-}
+# ✅ OPTIMIZED: No custom priors, let the data speak (Uniform Priors only)
+CUSTOM_PRIORS = {}
 
 
 # =============================================================================
