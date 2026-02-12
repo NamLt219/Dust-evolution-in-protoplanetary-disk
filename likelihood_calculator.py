@@ -14,6 +14,7 @@ Date: 2025-12-21
 import numpy as np
 from typing import Dict, Optional, Tuple, Any
 from scipy import stats
+from scipy.ndimage import shift as ndimage_shift
 
 try:
     from mcmc_pipeline_config import *
@@ -39,7 +40,8 @@ class LikelihoodCalculator:
                  roi_radius_pixels: int = None,
                  beam_major_arcsec: float = None,
                  beam_minor_arcsec: float = None,
-                 pixel_scale_arcsec: float = None):
+                 pixel_scale_arcsec: float = None,
+                 align_centers: bool = True):
         """
         Khởi tạo bộ tính Likelihood.
         
@@ -59,6 +61,9 @@ class LikelihoodCalculator:
             Minor axis của synthesized beam (arcsec).
         pixel_scale_arcsec : float, optional
             Kích thước 1 pixel (arcsec/pixel).
+        align_centers : bool, optional
+            If True, align model to observation peak before residual calculation.
+            This corrects for pointing offsets. Default True.
         """
         # ❌ REMOVED: self.logger (causes pickling error in multiprocessing)
         
@@ -96,6 +101,15 @@ class LikelihoodCalculator:
             print(f"  - Effective RMS: {self.effective_rms:.3e} Jy/beam")
         
         self.inv_sigma2 = 1.0 / (self.effective_rms ** 2)
+        
+        # --- CENTERING CORRECTION (NEW) ---
+        # Store observation peak position for aligning model images
+        self.align_centers = align_centers
+        if align_centers:
+            self.obs_peak = np.unravel_index(np.argmax(obs_image), obs_image.shape)
+            print(f"INFO: Centering correction enabled. Obs peak at ({self.obs_peak[1]}, {self.obs_peak[0]}) [x, y]")
+        else:
+            self.obs_peak = None
         
         # --- THIẾT LẬP GEOMETRIC MASK (QUAN TRỌNG) ---
         # Thay vì mask theo độ sáng, ta mask theo hình học để bắt trọn đĩa
@@ -172,6 +186,18 @@ class LikelihoodCalculator:
         if model_image.shape != self.obs_image.shape:
             # Silent return (logging in multiprocessing causes pickling issues)
             return -np.inf
+        
+        # 2.5. CENTERING CORRECTION (CRITICAL FIX)
+        # Align model to observation peak to remove pointing offset artifacts
+        if self.align_centers and self.obs_peak is not None:
+            model_peak = np.unravel_index(np.argmax(model_image), model_image.shape)
+            dy = self.obs_peak[0] - model_peak[0]
+            dx = self.obs_peak[1] - model_peak[1]
+            
+            # Only shift if offset is significant (> 0.5 pixel)
+            if abs(dy) > 0.5 or abs(dx) > 0.5:
+                model_image = ndimage_shift(model_image, shift=(dy, dx), 
+                                           order=1, mode='constant', cval=0.0)
 
         # 3. Tính Residual (Dư lượng)
         # Residual = Model - Data (hoặc Data - Model, bình phương lên như nhau)
