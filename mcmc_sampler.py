@@ -19,6 +19,7 @@ import numpy as np
 import emcee
 import time
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Callable, Tuple, Dict
 import json
@@ -252,13 +253,16 @@ class MCMCSampler:
             if self.logger:
                 self.logger.info(f"🆕 Fresh start: running {n_steps_to_run} steps")
         
-        # Progress bar
+        # Progress bar with unbuffered output
         if show_progress:
             pbar = tqdm(
                 total=n_steps_to_run, 
                 desc="MCMC Sampling",
                 initial=0,
-                unit="step"
+                unit="step",
+                file=sys.stdout,
+                mininterval=1.0,
+                smoothing=0.1
             )
         
         start_time = time.time()
@@ -316,7 +320,7 @@ class MCMCSampler:
                 self._log_diagnostics()
                 last_log_time = current_time
             
-            # Update progress bar
+            # Update progress bar with flush
             if show_progress:
                 pbar.update(1)
                 acc_rate = np.mean(self.sampler.acceptance_fraction)
@@ -325,6 +329,7 @@ class MCMCSampler:
                     "best_lnL": f"{self.best_log_prob:.2f}",
                     "saved": self.backend.iteration
                 })
+                sys.stdout.flush()  # Force immediate output
         
         if show_progress:
             pbar.close()
