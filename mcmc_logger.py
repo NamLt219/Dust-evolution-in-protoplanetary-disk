@@ -63,7 +63,8 @@ class MCMCLogger:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
         
-        # File handler
+        # File handler — UNBUFFERED so every log line is flushed to disk
+        # immediately. This prevents data loss if the process crashes.
         self.log_file = None
         if log_to_file:
             # Use process ID in filename to prevent conflicts in multiprocessing
@@ -72,7 +73,10 @@ class MCMCLogger:
             log_file = self.log_dir / f"{name}_{timestamp}.log"
             
             try:
-                file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+                # Open underlying stream with write-through (unbuffered text)
+                # so every emit() is immediately persisted to disk.
+                unbuffered_stream = open(log_file, mode='a', encoding='utf-8', buffering=1)  # line-buffered
+                file_handler = logging.StreamHandler(unbuffered_stream)
                 file_handler.setLevel(getattr(logging, file_level.upper()))
                 file_formatter = logging.Formatter(
                     '%(asctime)s | %(levelname)-8s | P%(process)d | %(funcName)s | %(message)s',
@@ -81,8 +85,11 @@ class MCMCLogger:
                 file_handler.setFormatter(file_formatter)
                 self.logger.addHandler(file_handler)
                 self.log_file = log_file
+                # ✅ Print absolute log path so user can always find it
+                abs_path = str(log_file.resolve())
+                print(f"📝 LOG FILE: {abs_path}", flush=True)
             except Exception as e:
-                print(f"WARNING: Could not setup file logging: {e}")
+                print(f"WARNING: Could not setup file logging: {e}", flush=True)
         
         # Metrics tracking
         self.metrics = {
@@ -176,6 +183,10 @@ class MCMCLogger:
 
     def close(self):
         for handler in self.logger.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
             handler.close()
 
 # Global logger instance
