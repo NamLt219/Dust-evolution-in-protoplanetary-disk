@@ -35,9 +35,18 @@ from likelihood_calculator import (
 )
 from mcmc_sampler import MCMCSampler
 
+# RAM Guardian for pre-flight check
+try:
+    from ram_guardian import print_ram_report, get_ram_status
+    RAM_GUARDIAN_AVAILABLE = True
+except ImportError:
+    RAM_GUARDIAN_AVAILABLE = False
+
 class MCMCPipeline:
-    def __init__(self, resume: bool = True):
+    def __init__(self, resume: bool = True, n_steps_override: int = None):
         self.resume = resume
+        # CLI override: allows running extra steps without editing config
+        self.n_steps_total = n_steps_override if n_steps_override is not None else N_STEPS_TOTAL
         
         # Setup Logger
         self.logger = setup_logger(
@@ -45,7 +54,10 @@ class MCMCPipeline:
             console_level="INFO",
             file_level="DEBUG"
         )
-        
+        # ✅ CRITICAL: print absolute log path IMMEDIATELY so it survives any crash
+        log_path = os.path.abspath(self.logger.log_file) if self.logger.log_file else "<console only>"
+        print(f"📝 CRITICAL: Log file is being written to: {log_path}", flush=True)
+
         self.logger.info("="*80)
         self.logger.info("🛡️  MCMC PIPELINE ORCHESTRATOR (SAFE MODE) STARTED")
         self.logger.info("="*80)
@@ -76,9 +88,22 @@ class MCMCPipeline:
         try:
             mem = psutil.virtual_memory()
             available_gb = mem.available / (1024**3)
-            self.logger.info(f"   RAM Available: {available_gb:.2f} GB")
+            total_gb = mem.total / (1024**3)
+            self.logger.info(f"   RAM Available: {available_gb:.2f} / {total_gb:.2f} GB")
             if available_gb < 1.0:
                 self.logger.warning("⚠️ LOW RAM! Less than 1GB available. Risk of OOM Crash.")
+            
+            # RAM budget check for N_PROCESSES workers
+            ram_per_worker_gb = 1.2  # Estimated: DustPy + RADMC-3D peak
+            ram_needed = N_PROCESSES * ram_per_worker_gb + 1.5  # Workers + OS/master
+            if ram_needed > total_gb:
+                self.logger.warning(
+                    f"⚠️ RAM BUDGET WARNING: {N_PROCESSES} workers × {ram_per_worker_gb} GB "
+                    f"+ 1.5 GB OS = {ram_needed:.1f} GB > {total_gb:.1f} GB total!"
+                )
+                self.logger.warning(f"   RAM Guardian will throttle workers to prevent OOM.")
+            else:
+                self.logger.info(f"   RAM Budget: {ram_needed:.1f} GB needed for {N_PROCESSES} workers (headroom: {total_gb - ram_needed:.1f} GB)")
         except ImportError:
             self.logger.info("   (psutil not installed, skipping RAM check)")
 
@@ -157,17 +182,42 @@ class MCMCPipeline:
 
     def run(self):
         """Chạy Pipeline."""
-        self.logger.info("🏁 STARTING PRODUCTION RUN")
-        
-        backend_exists = os.path.exists(os.path.join(MCMC_OUTPUT_DIR, "mcmc_chain.h5"))
+        backend_path = os.path.join(MCMC_OUTPUT_DIR, "mcmc_chain.h5")
+        backend_exists = os.path.exists(backend_path)
         should_reset = (not self.resume) or (not backend_exists)
-        
+
+        # ── RESUME VERIFICATION BANNER (look for this in logs!) ──────────────
+        if not should_reset and backend_exists:
+            import emcee as _emcee
+            _b = _emcee.backends.HDFBackend(backend_path)
+            saved_steps = _b.iteration
+            remaining = self.n_steps_total - saved_steps
+            self.logger.info("=" * 70)
+            self.logger.info("🔄 RESUME MODE CONFIRMED — NOT starting fresh")
+            self.logger.info(f"   Backend : {backend_path}")
+            self.logger.info(f"   Steps already saved : {saved_steps}")
+            self.logger.info(f"   Target total steps  : {self.n_steps_total}")
+            self.logger.info(f"   Steps to run NOW    : {remaining}")
+            self.logger.info("=" * 70)
+            if remaining <= 0:
+                self.logger.warning(
+                    f"⚠️  Target ({self.n_steps_total}) already reached! "
+                    f"Nothing to do. Use --n-steps to set a higher target."
+                )
+                return
+        else:
+            self.logger.info("=" * 70)
+            self.logger.info("🏁 FRESH START — new chain will be created")
+            self.logger.info(f"   Target total steps  : {self.n_steps_total}")
+            self.logger.info("=" * 70)
+        # ─────────────────────────────────────────────────────────────────────
+
         initial_state = self._generate_initial_positions()
         
         try:
             self.sampler_engine.run(
                 initial_positions=initial_state,
-                n_steps=N_STEPS_TOTAL,
+                n_steps=self.n_steps_total,
                 resume=not should_reset,
                 show_progress=True
             )
@@ -259,16 +309,19 @@ def dump_crash_report(e):
 
 if __name__ == "__main__":
     try:
-        set_start_method('forkserver')
+        set_start_method('spawn')  # ✅ Must match mcmc_sampler.py (spawn, not forkserver)
     except RuntimeError:
-        pass
+        pass  # Already set
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clean", action="store_true", help="Start fresh")
+    parser.add_argument("--clean", action="store_true", help="Start fresh (WARNING: destroys existing chain!)")
+    parser.add_argument("--n-steps", type=int, default=None,
+                        help="Total target steps (overrides N_STEPS_TOTAL in config). "
+                             "For resume: set to current_steps + new_steps (e.g. 600 to add 300 more to a 300-step chain).")
     args = parser.parse_args()
 
     try:
-        pipeline = MCMCPipeline(resume=not args.clean)
+        pipeline = MCMCPipeline(resume=not args.clean, n_steps_override=args.n_steps)
         pipeline.load_data()
         pipeline.setup_components()
         pipeline.run()
