@@ -16,6 +16,13 @@ from typing import Dict, Optional, Tuple, Any
 from scipy import stats
 from scipy.ndimage import shift as ndimage_shift
 
+# RAM Guardian for OOM protection
+try:
+    from ram_guardian import check_ram_or_wait
+    RAM_GUARDIAN_AVAILABLE = True
+except ImportError:
+    RAM_GUARDIAN_AVAILABLE = False
+
 try:
     from mcmc_pipeline_config import *
     from mcmc_logger import get_logger
