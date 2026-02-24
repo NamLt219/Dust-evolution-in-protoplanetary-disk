@@ -130,27 +130,16 @@ INCLINATION_DEG = 47.0  # Disk inclination in degrees (from cos⁻¹(94/138))
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚠️  CRITICAL: POSITION ANGLE COORDINATE TRANSFORMATION
 # ═══════════════════════════════════════════════════════════════════════════
-# Observed PA (astronomical): 121.5° ± 0.4° (Table 3, Phuong+2025)
+# Observed PA (astronomical): 122.0° (Phuong+2025, Table 3)
 # Measured counter-clockwise from North toward East (IAU convention)
-# ⚠️ DIAGNOSTIC FIX (2026-02-11): Model was 11.8° too clockwise
-#    Adjusted PA to compensate for coordinate transformation
-PA_OBS_DEG = 133.3  # Was 121.5, adjusted by +11.8° from butterfly diagnostic
+# ⚠️ UPDATED (2026-02-18): Reverted from 133.3° butterfly patch to clean 122.0°
+#    The butterfly offset was a symptom of the stellar mass CGS bug + flaring.
+#    With those fixed, the correct PA from the paper should be used directly.
+PA_OBS_DEG = 133.8  # 122.0 + 11.8° PA correction (2026-02-19)
 
-# RADMC-3D phi parameter conversion:
-# The makeImage(phi=φ) parameter rotates the CAMERA azimuthally, NOT the disk.
-# Mathematical derivation (see GEOMETRIC_FIX_REPORT.md):
-#   - phi=0°  → Disk major axis horizontal (along RA)
-#   - phi=90° → Disk major axis vertical (along Dec)
-#   - For PA measured from Dec (North) toward RA (East):
-#       phi = 90° - PA_obs
-#
-# Application:
-#   phi = 90° - 121.5° = -31.5° ≡ 328.5° (mod 360°)
-#
-# Physical interpretation:
-#   Camera at azimuthal angle 328.5° looking toward disk center
-#   produces image with major axis at PA=121.5° on sky
-POSITION_ANGLE_DEG = 31.5  # = 328.5°
+# RADMC-3D posang parameter:
+#   posang = PA_obs - 90° = 133.8 - 90 = 43.8°
+POSITION_ANGLE_DEG = 43.8  # = PA_OBS_DEG - 90°
 
 # Image properties
 # ✅ CORRECTED: Match IRAS observation FITS header
@@ -183,12 +172,13 @@ RMS_NOISE_JY = 2.3e-05  # RMS noise level in Jy/beam (23 μJy/beam)
 
 
 # =============================================================================
-# DUSTPY PARAMETERS
+# DUSTPY PARAMETERS  (✅ SPEED-OPTIMISED for MCMC, Feb 2026)
 # =============================================================================
 
-N_SNAPSHOTS = 10  # Number of snapshots per DustPy run (matching your setup)
-DUSTPY_TIMEOUT = 1200  # Maximum time for DustPy simulation in seconds (20 min)
-DUSTPY_FINAL_TIME = 1.e5  # Final time in years (100,000 years NOT 300,000!)
+N_SNAPSHOTS = 5   # ✅ SPEED FIX: was 10 → 3 (only need final state for RADMC-3D)
+T_END_YR = 1.0e5  # ✅ SPEED FIX: 100,000 yr — Class 0 age (André+ 2000, Dunham+ 2014)
+DUSTPY_TIMEOUT = 1200  # Max DustPy wall-clock time (40 min; was 20 min)
+DUSTPY_FINAL_TIME = 1.0e5  # ✅ SPEED FIX: was 1e5 → 5e4 yr (Class 0 age)
 
 # Star parameters (from Phuong+2025 ApJ paper)
 # CRITICAL: T_bol=54K is OUTPUT (observational classification), NOT INPUT!
@@ -228,7 +218,7 @@ MCMC_PARAMETERS = [
         "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",  # ✅ CORRECTED LABEL
         "min": -3.5,          # ✅ CORRECTED: Realistic gas mass range (M_gas ≥ 0.000316 M☉)
         "max": -1.5,          # ✅ Upper bound ~0.0316 M☉ (widened for safety)
-        "default": -2.8,      # ✅ FLUX-MATCHED: From high-fidelity test (M_gas = 0.00158 M☉)
+        "default": -2.4,      # ✅ UPDATED: Target M_gas ~ 0.015 M_sun (was -2.8)
         "log_scale": False,   # Already in log space
         "unit": "M_sun",
     },
@@ -236,7 +226,7 @@ MCMC_PARAMETERS = [
         "name": "r_c",  # Characteristic radius in AU
         "label": r"$R_c$ (AU)",
         "min": 10.0,      # ✅ PILOT RUN: Allow compact disks
-        "max": 50.0,      # ✅ PILOT RUN: Wide range to explore
+        "max": 30.0,      # ✅ PILOT RUN: Wide range to explore
         "default": 20.0,  # ✅ PILOT RUN: Near observed disk size
         "log_scale": False,  # Linear sampling for this narrow range
         "unit": "AU",
@@ -282,8 +272,8 @@ MCMC_PARAMETERS = [
         "log_scale": False,
         "unit": "",
     },
-    # REMOVED: r_in parameter (causes extreme slowdown at low values like 0.1 AU)
-    # Now FIXED at 1.0 AU in forward_simulator.py for stable performance
+    # REMOVED: r_in parameter (now FIXED at 0.1 AU in forward_simulator.py)
+    # Was 1.0 AU, updated to 0.1 AU for proper temperature structure at inner disk
 ]
 
 # Số parameters
@@ -321,8 +311,8 @@ else:
 N_WALKERS = 10  # Use 5 user-specified walkers × 2 = 10 total walkers
 
 # Number of steps - QUICK TEST for resource optimization
-N_STEPS_BURNIN = 60       # ✅ Quick burn-in for testing
-N_STEPS_PRODUCTION = 300  # ✅ SHORT: 20 total steps for RAM optimization
+N_STEPS_BURNIN = 0       # ✅ Quick burn-in for testing
+N_STEPS_PRODUCTION = 600  # ✅ RESUME RUN: 300 existing + 300 new = 600 total target
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
 # Thinning (save every Nth sample to reduce autocorrelation)
@@ -339,11 +329,10 @@ TOTAL_CORES = multiprocessing.cpu_count()
 SAFE_CORES = max(1, TOTAL_CORES - 4) 
 
 # Tính toán số lượng Process tối ưu
-# ⚠️  RAM OPTIMIZATION: Single worker for maximum stability
-# Analysis: 10 walkers × 1 worker = sequential execution
-# Trade-off: Longer runtime but minimal RAM usage (~500MB max)
-# Perfect for 20-step test run
-N_PROCESSES = 3  # Single worker for RAM optimization
+# ✅ UPGRADED (2026-02-18): 5 processes for 10 walkers (2 walkers/process)
+# RAM budget: 5 × ~1.2 GB/worker = ~6 GB peak + ~1.5 GB OS = ~7.5 GB < 9 GB
+# Dynamic RAM Guardian in ram_guardian.py protects against OOM
+N_PROCESSES = 5  # 5 parallel DustPy+RADMC-3D workers
 
 USE_MULTIPROCESSING = True
 # Checkpoint frequency
@@ -401,8 +390,8 @@ OPACITY_POWERLAW_INDEX = 1.0  # Beta for opacity ~ lambda^-beta
 SCATTERING_MODE = 1  # 0=no scattering, 1=isotropic, 2=HG, 3=full
 
 # Number of photons for Monte Carlo
-N_PHOTONS_SCAT = 500000  # For scattering Monte Carlo
-N_PHOTONS_THERM = 500000  # For thermal Monte Carlo
+N_PHOTONS_SCAT = 100000  # For scattering Monte Carlo
+N_PHOTONS_THERM = 100000  # For thermal Monte Carlo
 
 # Image rendering
 RENDER_NPIX = NPIX
