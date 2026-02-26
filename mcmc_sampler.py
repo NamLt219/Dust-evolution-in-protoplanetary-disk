@@ -153,28 +153,48 @@ class MCMCSampler:
                 self.logger.info(f"   Will resume from step {saved_steps + 1}")
     
     def _init_sampler(self):
-        """Initialize emcee sampler with HDF5 backend."""
+        """Initialize emcee sampler with HDF5 backend.
+
+        Move strategy: DEMove + DESnookerMove mix.
+        Rationale: StretchMove (emcee default) degrades badly when parameters
+        are correlated or the posterior is elongated — which is exactly the
+        case for (log_mdisk, r_c, dust_to_gas).  Differential Evolution moves
+        learn the covariance structure directly from the ensemble itself and
+        are far more efficient for degenerate/correlated posteriors
+        (ter Braak & Vrugt 2008; Hou+2012 ApJ).
+
+        Weights: 80% DEMove (global covariance steps) + 20% DESnookerMove
+        (projection steps that help escape ridges and curved degeneracies).
+        """
+        moves = [
+            (emcee.moves.DEMove(),        0.8),
+            (emcee.moves.DESnookerMove(), 0.2),
+        ]
+        if self.logger:
+            self.logger.info("Move strategy: 80% DEMove + 20% DESnookerMove (ter Braak & Vrugt 2008)")
+
         if self.use_parallel:
             if self.pool is None:
-                # Use context manager to ensure proper cleanup
                 ctx = mp.get_context('spawn')
                 self.pool = ctx.Pool(self.n_processes, maxtasksperchild=1)
                 if self.logger:
                     self.logger.info(f"Initialized multiprocessing pool: {self.n_processes} workers (spawn context, maxtasksperchild=1)")
-            
+
             self.sampler = emcee.EnsembleSampler(
                 self.n_walkers,
                 self.n_params,
                 self.log_prob_fn,
+                moves=moves,
                 pool=self.pool,
-                backend=self.backend  # ← KEY: HDF5 Backend!
+                backend=self.backend
             )
         else:
             self.sampler = emcee.EnsembleSampler(
                 self.n_walkers,
                 self.n_params,
                 self.log_prob_fn,
-                backend=self.backend  # ← KEY: HDF5 Backend!
+                moves=moves,
+                backend=self.backend
             )
     
     def run(self,
