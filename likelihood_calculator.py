@@ -77,44 +77,76 @@ class LikelihoodCalculator:
         self.obs_image = obs_image
         self.rms_noise = rms_noise
         
-        # ===== BEAM CORRELATION CORRECTION (CRITICAL FIX) =====
-        # Calculate effective noise accounting for beam correlation
+        # ===== BEAM CORRELATION CORRECTION (CORRECTED MATH) =====
+        # ALMA images have correlated pixels: each synthesized beam covers
+        # N_ppb ≈ Ω_beam / Ω_pixel pixels.  Summing χ² over ALL N_pix pixels
+        # as if they were independent inflates χ² by N_ppb and freezes walkers.
+        #
+        # CORRECT APPROACH (Czekala+2015, ALMA Tech Handbook §10.4):
+        #   Keep σ = σ_thermal (per beam, as measured by the RMS map).
+        #   Weight the χ² sum by 1/N_ppb so the effective number of
+        #   independent terms equals the number of independent beams.
+        #
+        #   χ²_eff = (1/N_ppb) × Σ_i [(M_i - O_i)² / σ_thermal²]
+        #          = Σ_i [(M_i - O_i)² / (N_ppb × σ_thermal²)]
+        #
+        # This is mathematically equivalent to using
+        #   σ_eff² = N_ppb × σ_thermal²  →  σ_eff = σ_thermal × √N_ppb
+        # but the PHYSICAL meaning is correct: we are down-weighting
+        # correlated pixels, not claiming each pixel has higher noise.
         if beam_major_arcsec and beam_minor_arcsec and pixel_scale_arcsec:
-            # Beam solid angle (Gaussian beam formula)
-            # Ω_beam = π/(4ln2) × BMAJ × BMIN (arcsec²)
-            beam_area_arcsec2 = (np.pi / (4 * np.log(2))) * beam_major_arcsec * beam_minor_arcsec
-            
-            # Pixel solid angle
+            # Beam solid angle: Ω_beam = π/(4 ln2) × BMAJ × BMIN  [arcsec²]
+            beam_area_arcsec2 = (np.pi / (4.0 * np.log(2.0))) * beam_major_arcsec * beam_minor_arcsec
             pixel_area_arcsec2 = pixel_scale_arcsec ** 2
-            
-            # Number of pixels per beam (correlation factor)
-            pixels_per_beam = beam_area_arcsec2 / pixel_area_arcsec2
-            
-            # Effective noise (ALMA Technical Handbook Section 10.4.1)
-            # σ_eff = σ_thermal × sqrt(pixels_per_beam)
-            self.effective_rms = rms_noise * np.sqrt(pixels_per_beam)
-            
-            print(f"INFO: Beam correlation correction applied:")
-            print(f"  - Thermal RMS: {rms_noise:.3e} Jy/beam")
-            print(f"  - Beam area: {beam_area_arcsec2:.3f} arcsec²")
-            print(f"  - Pixel area: {pixel_area_arcsec2:.6f} arcsec²")
-            print(f"  - Pixels per beam: {pixels_per_beam:.2f}")
-            print(f"  - Effective RMS: {self.effective_rms:.3e} Jy/beam (scaled by {np.sqrt(pixels_per_beam):.2f}×)")
+            self.pixels_per_beam = beam_area_arcsec2 / pixel_area_arcsec2
+
+            # σ_eff = σ_thermal × √(N_ppb)  — the down-weighting factor
+            self.effective_rms = rms_noise * np.sqrt(self.pixels_per_beam)
+
+            print(f"INFO: Beam correlation correction applied (Czekala+2015 method):")
+            print(f"  Thermal RMS      : {rms_noise:.3e} Jy/beam")
+            print(f"  Beam area        : {beam_area_arcsec2:.4f} arcsec²")
+            print(f"  Pixel area       : {pixel_area_arcsec2:.6f} arcsec²")
+            print(f"  Pixels per beam  : {self.pixels_per_beam:.1f}")
+            print(f"  σ_eff            : {self.effective_rms:.3e} Jy/beam  (×{np.sqrt(self.pixels_per_beam):.1f})")
+            print(f"  → χ² will be normalised to ~N_beams independent d.o.f.")
         else:
-            # Fallback: Use thermal noise without correction (conservative)
-            self.effective_rms = rms_noise * 2.5  # Safety factor for missing beam info
-            print(f"WARNING: Beam parameters not provided. Using conservative RMS scaling (2.5×).")
-            print(f"  - Thermal RMS: {rms_noise:.3e} Jy/beam")
-            print(f"  - Effective RMS: {self.effective_rms:.3e} Jy/beam")
-        
+            # Fallback if beam info not provided: use bare thermal RMS
+            # (conservative — caller should always pass beam parameters)
+            self.pixels_per_beam = 1.0
+            self.effective_rms = rms_noise
+            print(f"WARNING: Beam parameters not provided. Using bare thermal RMS.")
+            print(f"  Thermal RMS: {rms_noise:.3e} Jy/beam  (NO beam-correlation correction)")
+
         self.inv_sigma2 = 1.0 / (self.effective_rms ** 2)
         
-        # --- CENTERING CORRECTION (NEW) ---
-        # Store observation peak position for aligning model images
+        # --- CENTERING CORRECTION ---
+        # Use flux-weighted centroid (NOT argmax) for robust sub-pixel alignment.
+        # argmax is noisy: a single hot pixel can pull the peak 2-3 pixels off-center.
+        # Centroid over the brightest 10% of pixels is stable and noise-resistant.
         self.align_centers = align_centers
         if align_centers:
-            self.obs_peak = np.unravel_index(np.argmax(obs_image), obs_image.shape)
-            print(f"INFO: Centering correction enabled. Obs peak at ({self.obs_peak[1]}, {self.obs_peak[0]}) [x, y]")
+            # CRITICAL: percentile must be computed on NON-ZERO pixels only.
+            # ALMA images have large zero-padded backgrounds; np.percentile over
+            # the full array returns ≈ 0 → bright_mask covers every pixel → wrong centroid.
+            nonzero_vals = obs_image[obs_image > 0]
+            if len(nonzero_vals) == 0:
+                self.obs_peak = None
+                print("WARNING: Observation image is all zeros — centering disabled.")
+            else:
+                threshold = np.percentile(nonzero_vals, 90)  # top 10% of actual signal
+                bright_mask = obs_image >= threshold
+                total_flux = obs_image[bright_mask].sum()
+                ny_o, nx_o = obs_image.shape
+                yy, xx = np.indices((ny_o, nx_o))
+                cen_y = (obs_image * bright_mask * yy).sum() / total_flux
+                cen_x = (obs_image * bright_mask * xx).sum() / total_flux
+                self.obs_peak = (cen_y, cen_x)
+                argmax_yx = np.unravel_index(np.argmax(obs_image), obs_image.shape)
+                print(f"INFO: Centering correction enabled (flux-weighted centroid, non-zero pixels only).")
+                print(f"  centroid  : ({cen_x:.2f}, {cen_y:.2f}) [x, y]")
+                print(f"  argmax    : ({argmax_yx[1]}, {argmax_yx[0]}) [x, y]")
+                print(f"  image ctr : ({nx_o//2}, {ny_o//2}) [x, y]")
         else:
             self.obs_peak = None
         
@@ -194,17 +226,27 @@ class LikelihoodCalculator:
             # Silent return (logging in multiprocessing causes pickling issues)
             return -np.inf
         
-        # 2.5. CENTERING CORRECTION (CRITICAL FIX)
-        # Align model to observation peak to remove pointing offset artifacts
+        # 2.5. CENTERING CORRECTION
+        # Align model centroid to observation centroid using sub-pixel shift.
+        # Uses flux-weighted centroid (top 10% pixels) — stable against noise spikes.
         if self.align_centers and self.obs_peak is not None:
-            model_peak = np.unravel_index(np.argmax(model_image), model_image.shape)
-            dy = self.obs_peak[0] - model_peak[0]
-            dx = self.obs_peak[1] - model_peak[1]
-            
-            # Only shift if offset is significant (> 0.5 pixel)
-            if abs(dy) > 0.5 or abs(dx) > 0.5:
-                model_image = ndimage_shift(model_image, shift=(dy, dx), 
-                                           order=1, mode='constant', cval=0.0)
+            nonzero_mod = model_image[model_image > 0]
+            if len(nonzero_mod) == 0:
+                return -np.inf  # degenerate model (all zeros)
+            threshold = np.percentile(nonzero_mod, 90)  # top 10% of actual signal
+            bright_mask = model_image >= threshold
+            total_flux = model_image[bright_mask].sum()
+            if total_flux > 0:
+                ny_m, nx_m = model_image.shape
+                yy, xx = np.indices((ny_m, nx_m))
+                mod_cen_y = (model_image * bright_mask * yy).sum() / total_flux
+                mod_cen_x = (model_image * bright_mask * xx).sum() / total_flux
+                dy = self.obs_peak[0] - mod_cen_y
+                dx = self.obs_peak[1] - mod_cen_x
+                # Only shift if offset > 0.3 pixel (sub-pixel precision)
+                if abs(dy) > 0.3 or abs(dx) > 0.3:
+                    model_image = ndimage_shift(model_image, shift=(dy, dx),
+                                               order=1, mode='constant', cval=0.0)
 
         # 3. Tính Residual (Dư lượng)
         # Residual = Model - Data (hoặc Data - Model, bình phương lên như nhau)
