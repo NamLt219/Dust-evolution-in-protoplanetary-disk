@@ -1078,49 +1078,48 @@ class ForwardModelSimulatorV2:
         try:
             # IMPORT CONFIG
             from mcmc_pipeline_config import (
-                PA_OBS_DEG, INCLINATION_DEG, IMAGE_SIZE_AU, 
+                PA_OBS_DEG, INCLINATION_DEG, IMAGE_SIZE_AU,
                 IMAGE_NPIX, WAV_MICRON, SIMULATION_TIMEOUT,
                 BEAM_MAJOR_ARCSEC, BEAM_MINOR_ARCSEC, BEAM_PA_DEG, DISTANCE_PC
             )
 
+            # ── Resolve inclination and PA from walker params (if free) ─────────
+            # When 'inclination' and/or 'posang' are MCMC free parameters, the
+            # walker proposes new values each step via the params dict.
+            # Fall back to config constants for backward-compatible fixed runs.
+            incl_value   = float(params.get("inclination", INCLINATION_DEG))
+            pa_obs_value = float(params.get("posang",      PA_OBS_DEG))
+            # RADMC-3D posang = PA_obs - 90°  (camera rotation, N→E CCW)
+            posang_value = pa_obs_value - 90.0
+
             # 1. RUN MCTHERM (thermal Monte Carlo)
             subprocess.run(
-                f"{self.radmc3d_exec} mctherm", 
-                shell=True, check=True, 
+                f"{self.radmc3d_exec} mctherm",
+                shell=True, check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 timeout=SIMULATION_TIMEOUT
             )
-            
-            # 2. GENERATE IMAGE WITH CORRECT POSANG
-            # ========================================================================
-            # RADMC-3D posang parameter:
-            #   - posang rotates the camera view (N→E, counter-clockwise)
-            #   - Default (posang=0): disk major axis horizontal (PA ~ 90°)
-            #   - To get PA = 121.5°: posang = PA_obs - 90 = 31.5°
-            # 
-            # For axisymmetric disk:
-            #   - incl = 47° (disk inclination from observation)
-            #   - phi = 0° (irrelevant for axisymmetric disk)
-            #   - posang = 31.5° (to match observed PA = 121.5°)
-            # ========================================================================
-            
-            # Calculate posang to match observation PA
-            posang_value = PA_OBS_DEG - 90.0  # 121.5 - 90 = 31.5°
-            
+
+            # 2. GENERATE IMAGE
+            # ─────────────────────────────────────────────────────────────────
+            # incl     : disk inclination — now a free MCMC parameter
+            # posang   : camera rotation = PA_obs − 90°  — now a free MCMC parameter
+            # phi = 0  : irrelevant for axisymmetric disk
+            # ─────────────────────────────────────────────────────────────────
             self._log_info(f"RADMC-3D Image Generation:")
-            self._log_info(f"  incl: {INCLINATION_DEG}° (disk inclination)")
+            self._log_info(f"  incl: {incl_value}° (disk inclination)")
             self._log_info(f"  phi: 0° (irrelevant for axisymmetric disk)")
-            self._log_info(f"  posang: {posang_value}° (to get PA={PA_OBS_DEG}° on sky)")
+            self._log_info(f"  posang: {posang_value}° (to get PA={pa_obs_value}° on sky)")
             self._log_info(f"  → Direct posang rotation (no post-processing needed)")
 
             sizeau_radius = IMAGE_SIZE_AU / 2.0
-            
+
             cmd = (
                 f"{self.radmc3d_exec} image "
                 f"lambda {WAV_MICRON} "
                 f"npix {IMAGE_NPIX} "
                 f"sizeau {sizeau_radius} "
-                f"incl {INCLINATION_DEG} "
+                f"incl {incl_value} "
                 f"phi 0 "
                 f"posang {posang_value} "
                 f"nostar"
