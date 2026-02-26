@@ -272,6 +272,28 @@ MCMC_PARAMETERS = [
         "log_scale": False,
         "unit": "",
     },
+    # ─── NEW: Viewing geometry parameters (added 2026-02-24) ────────────────────
+    # Motivation: residual map shows a geometric dipole along minor/major axes,
+    # indicating the fixed literature angles (47°, 133.8°) are slightly off.
+    # Freeing these two angles lets the MCMC absorb the projection mismatch.
+    {
+        "name": "inclination",   # Disk inclination [degrees]
+        "label": r"$i$ (°)",
+        "min": 35.0,   # Well below literature value 47° (allows ~12° slack)
+        "max": 60.0,   # Well above literature value 47°
+        "default": 47.0,  # Literature: cos⁻¹(94/138) ≈ 47° (Phuong+2025)
+        "log_scale": False,
+        "unit": "deg",
+    },
+    {
+        "name": "posang",        # Disk position angle on sky [degrees]
+        "label": r"PA (°)",
+        "min": 120.0,  # 133.8° − 13.8° lower slack
+        "max": 150.0,  # 133.8° + 16.2° upper slack
+        "default": 133.8,  # Current best estimate (PA_OBS_DEG)
+        "log_scale": False,
+        "unit": "deg",
+    },
     # REMOVED: r_in parameter (now FIXED at 0.1 AU in forward_simulator.py)
     # Was 1.0 AU, updated to 0.1 AU for proper temperature structure at inner disk
 ]
@@ -307,12 +329,12 @@ else:
 
 # ✅ OPTIMIZED based on test results (5.2 min/simulation):
 # Updated for 7 parameters (was 4)
-# Number of walkers (user requested: 5 walkers × 2 = 10 total)
-N_WALKERS = 10  # Use 5 user-specified walkers × 2 = 10 total walkers
+# Number of walkers (user requested: 7 walkers × 2 = 14 total)
+N_WALKERS = 15  # Use 7 user-specified walkers × 2 = 14 total walkers
 
 # Number of steps - QUICK TEST for resource optimization
-N_STEPS_BURNIN = 0       # ✅ Quick burn-in for testing
-N_STEPS_PRODUCTION = 600  # ✅ RESUME RUN: 300 existing + 300 new = 600 total target
+N_STEPS_BURNIN = 0       # ✅ No burn-in needed for geometry test
+N_STEPS_PRODUCTION = 200  # ✅ GEOMETRY TEST: 200 steps to check incl/posang convergence
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
 # Thinning (save every Nth sample to reduce autocorrelation)
