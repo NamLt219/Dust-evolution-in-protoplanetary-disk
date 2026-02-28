@@ -1,18 +1,3 @@
-"""
-Comprehensive Logging System for MCMC Pipeline
-===============================================
-Hierarchical logging với multiple handlers, context tracking, và error capture.
-
-Features:
-- Console + File logging với different levels
-- Structured logging cho MCMC iterations
-- Error tracking và exception handling
-- Performance metrics
-- Progress reporting
-
-Author: Pipeline Builder
-Date: 2025-11-19
-"""
 
 import logging
 import sys
@@ -27,9 +12,6 @@ import threading
 import multiprocessing
 
 class MCMCLogger:
-    """
-    Advanced logger cho MCMC pipeline với context-aware logging.
-    """
     
     def __init__(self, 
                  name: str = "mcmc_pipeline",
@@ -37,9 +19,7 @@ class MCMCLogger:
                  console_level: str = "INFO",
                  file_level: str = "DEBUG",
                  log_to_file: bool = True):
-        """
-        Initialize MCMC logger.
-        """
+
         self.name = name
         self.log_dir = Path(log_dir)
         try:
@@ -193,11 +173,6 @@ class MCMCLogger:
 _global_logger: Optional[MCMCLogger] = None
 
 def get_logger() -> MCMCLogger:
-    """
-    Get global logger instance.
-    ROBUST VERSION: Auto-initializes if called from a worker process
-    where setup_logger() hasn't been called.
-    """
     global _global_logger
     if _global_logger is None:
         # Emergency setup for worker processes to prevent crash
