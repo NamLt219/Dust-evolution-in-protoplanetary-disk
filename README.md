@@ -138,153 +138,85 @@ def setup_logger(log_dir):
 
 ---
 
-## 🎯 5 THAM SỐ TỰ DO (FINAL CONFIG)
+## 🎯 6 THAM SỐ TỰ DO (FINAL CONFIG)
 
 ```python
 MCMC_PARAMETERS = [
     {
-        "name": "log_mdisk",      # Log10(M_disk/M_sun)
-        "min": -4.0,
-        "max": -1.0,
-        "default": -1.92,
+        
+        "name": "log_mdisk",  
+        "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",  # ✅ CORRECTED LABEL
+        "min": -3.5,         
+        "max": -1.5,         
+        "default": -2.4,      
+        "log_scale": False,   
+        "unit": "M_sun",
     },
     {
-        "name": "r_c",            # Characteristic radius (AU)
-        "min": 30.0,
-        "max": 80.0,
-        "default": 45.0,
+        "name": "r_c",  # Characteristic radius in AU
+        "label": r"$R_c$ (AU)",
+        "min": 10.0,     
+        "max": 30.0,     
+        "default": 20.0,  
+        "log_scale": False,  # Linear sampling for this narrow range
+        "unit": "AU",
     },
     {
-        "name": "vFrag",          # Fragmentation velocity (cm/s)
-        "min": 100.0,
-        "max": 500.0,
-        "default": 200.0,
+        "name": "vFrag", 
+        "label": r"$v_{\rm frag}$ (cm/s)",
+        "min": 100.0,    
+        "max": 500.0,     
+        "default": 200.0,  # Test showed this works well
+        "log_scale": False,  # Linear for narrow range
+        "unit": "cm/s",
     },
     {
-        "name": "sigma_exp",      # Surface density exponent
-        "min": 0.5,
-        "max": 1.5,
-        "default": 1.0,
+        "name": "sigma_exp",  # Surface density power-law exponent (γ)
+        "label": r"$\gamma$ (Σ exponent)",
+        "min": 0.5,       
+        "max": 2.5,
+        "default": 1.6,  
+        "log_scale": False,
+        "unit": "",
+
     },
+
     {
-        "name": "dust_to_gas",    # Dust-to-gas ratio
-        "min": 0.001,
-        "max": 0.02,
-        "default": 0.01,
+        "name": "dust_to_gas",  # Dust-to-gas mass ratio
+        "label": r"$\epsilon$ (d2g ratio)",
+        "min": 0.001,   
+        "max": 0.05,      
+        "default": 0.01,  # ISM value
+        "log_scale": False,
+        "unit": "",
+    },
+
+    {
+        "name": "r_in",          # Inner cavity (dust depletion) radius [AU]
+        "label": r"$R_{\rm in}$ (AU)",
+        "min": 1.0,   # Minimum: ~1 AU (sub-beam but affects thermal structure)
+        "max": 10.0,  # Maximum: ~10 AU (ALMA beam at 156 pc ≈ 8 AU, stay resolvable)
+        "default": 3.0,  # Starting guess: moderate inner clearing
+        "log_scale": False,
+        "unit": "AU",
     },
 ]
-
-FIXED_PARAMETERS = {
-    "r_in": 1.0,      # Inner radius (AU)
-    "alpha": 1e-3,    # Turbulence parameter
-}
 ```
 
-**Lý do 5 params:**
-- Đã loại bỏ `sigma_rc` → tránh degeneracy với `r_c`
-- `r_in` fixed → tránh slow convergence
-- `alpha` fixed → standard value
 
 ---
 
 ## 🚀 QUICK START
 
-### 1. Setup Environment
-```bash
-# Activate virtual environment
-source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
-```
 
-### 2. Verify Installation
+ Production MCMC
 ```bash
-python3 -c "
-import dustpy
-import radmc3dPy
-import emcee
-print('✅ All packages installed')
-"
-```
-
-### 3. Run Test Simulation
-```bash
-# Quick test (1 forward model call)
-python3 forward_simulator.py
-```
-
-### 4. Run Validation (Tonight!)
-```bash
-# Full validation suite (~4 hours)
-./setup_overnight.sh
-```
-
-### 5. Production MCMC (After validation)
-```bash
-# Full MCMC run (50 walkers × 2000 steps)
 python3 mcmc_pipeline_main.py
 ```
 
 ---
 
-## 📊 VALIDATION STATUS
-
-### Spiral 1 (ĐANG CHẠY):
-- ✅ Test 1.1: DustPy Parameter Sensitivity (7 tests)
-- ✅ Test 1.2: Mass Conservation
-- **Status:** Running (started 18:15)
-- **ETA:** 23:00 tonight
-
-### Spiral 2 (TODO):
-- [ ] RADMC3D validation
-- [ ] Beam convolution tests
-- [ ] Integration tests
-
-### Spiral 3 (TODO):
-- [ ] High-res synthetic recovery
-- [ ] Convergence diagnostics
-- [ ] Final GO/NO-GO
-
----
-
-## 📁 DIRECTORY STRUCTURE
-
-```
-Claude.4.5_MCMC/
-├── 📋 CONFIG & CORE
-│   ├── mcmc_pipeline_config.py    # ⭐ Central config
-│   ├── forward_simulator.py       # ⭐ Forward model
-│   ├── likelihood_calculator.py   # ⭐ Likelihood
-│   ├── mcmc_sampler.py           # ⭐ MCMC engine
-│   ├── mcmc_pipeline_main.py     # ⭐ Main orchestrator
-│   └── mcmc_logger.py            # ⭐ Logging
-│
-├── 🧪 VALIDATION
-│   ├── tests/
-│   │   ├── test_dustpy_sensitivity.py
-│   │   └── test_mass_conservation.py
-│   ├── run_spiral1_validation.py
-│   └── VALIDATION_PLAN.md
-│
-├── 🚀 SCRIPTS
-│   ├── setup_overnight.sh
-│   ├── launch_spiral1.sh
-│   └── check_status.sh
-│
-├── 📊 OUTPUTS
-│   ├── test_outputs/
-│   ├── test_logs/
-│   └── mcmc_output/ (will be created)
-│
-└── 📖 DOCUMENTATION
-    ├── GETTING_STARTED.md (this file)
-    ├── VALIDATION_PLAN.md
-    ├── CODE_READINESS_CONFIRMED.md
-    └── PARAMETER_DEGENERACY_FIX.md
-```
-
----
 
 ## 🔧 KEY FEATURES
 
@@ -295,104 +227,15 @@ Claude.4.5_MCMC/
 4. **Output:** Synthetic image matching observations
 
 ### MCMC Configuration:
-- **Sampler:** emcee (affine-invariant)
-- **Walkers:** 50 (10× parameters)
-- **Steps:** 2000 per walker
-- **Total:** 100,000 forward model calls
-- **Runtime:** ~5-7 days (estimated)
-
-### Robustness Features:
-- ✅ Checkpoint/restart capability
-- ✅ Timeout handling (per simulation)
-- ✅ Error logging & recovery
-- ✅ Progress monitoring
-- ✅ Convergence diagnostics
+- **Sampler
+- **Walkers
+- **Steps
+- **Total
+- **Runtime
 
 ---
 
-## 📈 EXPECTED OUTPUTS
 
-### MCMC Results:
-```
-mcmc_output/
-├── chain.npy              # Full MCMC chain
-├── log_prob.npy           # Log probabilities
-├── corner_plot.png        # Parameter correlations
-├── trace_plot.png         # Chain convergence
-├── best_fit_params.json   # Best-fit values
-└── summary_statistics.txt # Quantiles, uncertainties
-```
-
-### Validation Results:
-```
-test_outputs/
-├── dustpy_sensitivity/
-│   ├── results.json
-│   └── *.png (diagnostic plots)
-├── mass_conservation/
-│   ├── results.json
-│   └── mass_evolution.png
-└── spiral1_summary.json
-```
-
----
-
-## 🚨 TROUBLESHOOTING
-
-### Common Issues:
-
-**1. DustPy convergence failures:**
-```bash
-# Check parameter ranges in mcmc_pipeline_config.py
-# Especially: r_c, vFrag, log_mdisk
-```
-
-**2. RADMC3D crashes:**
-```bash
-# Check dust opacity table
-# Verify grid resolution (Nr, Nphi, Ntheta)
-```
-
-**3. Memory issues:**
-```bash
-# Reduce grid resolution
-# Decrease number of photons
-# Monitor with: watch -n 1 free -h
-```
-
-**4. Slow MCMC:**
-```bash
-# Expected: ~5-10 min per forward model
-# If slower: Check DustPy convergence settings
-```
-
----
-
-## 📞 SUPPORT & NEXT STEPS
-
-### After Validation Completes:
-1. Review test results: `./check_status.sh`
-2. Analyze plots in `test_outputs/`
-3. If all passed → Proceed to Spiral 2
-4. If failures → Debug and re-run specific tests
-
-### Before Production MCMC:
-- [ ] Complete all validation tests
-- [ ] Review parameter priors
-- [ ] Test synthetic recovery
-- [ ] Verify convergence diagnostics
-- [ ] Setup monitoring dashboard
-
-### Production Run:
-```bash
-# Final command (after all validation)
-python3 mcmc_pipeline_main.py \
-    --walkers 50 \
-    --steps 2000 \
-    --output mcmc_output/
-```
-
----
 
 ## 🎓 REFERENCES
 
@@ -408,6 +251,3 @@ python3 mcmc_pipeline_main.py \
 
 ---
 
-**Created:** 2025-12-08 18:25  
-**Status:** ✅ Ready for production (after validation)  
-**Next:** Complete Spiral 1 validation (ETA: 23:00 tonight)
