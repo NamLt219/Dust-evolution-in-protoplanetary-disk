@@ -1,11 +1,3 @@
-"""
-Configuration file for MCMC Pipeline
-=====================================
-Định nghĩa tất cả parameters, paths, và settings cho dự án MCMC fitting.
-
-Author: Pipeline Builder
-Date: 2025-11-19
-"""
 
 import os
 import sys
@@ -111,8 +103,7 @@ def _find_opacity_file():
 
 RADMC3D_OPACITY_FILE = _find_opacity_file()
 
-# Templates - REMOVED: DustPy creates Simulation() directly, no template needed
-# TEMPLATE_INI_PATH = os.path.join(WORK_DIR, "sim_template.ini")
+
 
 # Create directories if not exist
 for d in [WORK_DIR, MCMC_OUTPUT_DIR, CHECKPOINT_DIR, LOG_DIR]:
@@ -123,119 +114,99 @@ for d in [WORK_DIR, MCMC_OUTPUT_DIR, CHECKPOINT_DIR, LOG_DIR]:
 # OBSERVATION PARAMETERS
 # =============================================================================
 
-# Source properties (from Phuong+2025 ApJ paper)
-DISTANCE_PC = 156.0  # Distance to IRAS04166 in parsecs (Gaia EDR3)
-INCLINATION_DEG = 47.0  # Disk inclination in degrees (from cos⁻¹(94/138))
+
+DISTANCE_PC = 156.0  
+INCLINATION_DEG = 47.0 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚠️  CRITICAL: POSITION ANGLE COORDINATE TRANSFORMATION
 # ═══════════════════════════════════════════════════════════════════════════
-# Observed PA (astronomical): 122.0° (Phuong+2025, Table 3)
-# Measured counter-clockwise from North toward East (IAU convention)
-# ⚠️ UPDATED (2026-02-18): Reverted from 133.3° butterfly patch to clean 122.0°
-#    The butterfly offset was a symptom of the stellar mass CGS bug + flaring.
-#    With those fixed, the correct PA from the paper should be used directly.
-PA_OBS_DEG = 133.8  # 122.0 + 11.8° PA correction (2026-02-19)
+
+PA_OBS_DEG = 121.5  
 
 # RADMC-3D posang parameter:
-#   posang = PA_obs - 90° = 133.8 - 90 = 43.8°
-POSITION_ANGLE_DEG = 43.8  # = PA_OBS_DEG - 90°
 
-# Image properties
-# ✅ CORRECTED: Match IRAS observation FITS header
-# CDELT1 = 8.33e-7 deg/pixel = 3 mas/pixel → 201 pixels = 603 mas = 0.603 arcsec
-# At 156 pc: 0.603 arcsec = 94.068 AU
-# CRITICAL: IMAGE_SIZE_AU stores the FULL FOV DIAMETER (total width of image)
-# RADMC3D's "sizeau" parameter expects HALF-WIDTH (radius: -sizeau to +sizeau)
-# → Must pass IMAGE_SIZE_AU/2 to RADMC3D to get correct FOV!
-# Note: Edge flux clipping ~1.5% is acceptable for r_c ~ 20 AU disk
+POSITION_ANGLE_DEG = PA_OBS_DEG - 90.0        # = PA_OBS_DEG - 90°
+
+
 IMAGE_SIZE_AU = 94.0  # MUST match observation FOV for direct pixel comparison
 NPIX = 201  # Number of pixels (201×201)
 IMAGE_NPIX = NPIX  # Alias for compatibility
 WAV_MICRON = 1300.0  # Observation wavelength in microns
 
-# Physical disk size from paper (Table 3, Phuong+2025) - EXACT values
-# These are NOT used in grid setup (grid is larger to include envelope)
+
 DISK_MAJOR_ARCSEC = 0.1379  # Major axis: 137.9 ± 0.7 mas (Table 3)
 DISK_MINOR_ARCSEC = 0.0937  # Minor axis: 93.7 ± 0.5 mas (Table 3)
 DISK_RADIUS_MAJOR_AU = DISK_MAJOR_ARCSEC * DISTANCE_PC  # ~21.5 AU at 156 pc
 DISK_RADIUS_MINOR_AU = DISK_MINOR_ARCSEC * DISTANCE_PC  # ~14.6 AU at 156 pc
 
-# Beam properties (from Phuong+2025: "synthesized beam is 50 mas × 37 mas (P.A. = 22°)")
+
 BEAM_MAJOR_ARCSEC = 0.05  # Major axis: 50 mas = 0.05 arcsec
 BEAM_MINOR_ARCSEC = 0.037  # Minor axis: 37 mas = 0.037 arcsec (NOT 36.6!)
 BEAM_PA_DEG = 22.0  # Beam position angle: 22° (exact from paper)
 
-# Noise properties (from Phuong+2025 Table 1)
-# Paper reports: 23 μJy/beam for continuum (robust=0.0)
+
 RMS_NOISE_JY = 2.3e-05  # RMS noise level in Jy/beam (23 μJy/beam)
 
 
 # =============================================================================
-# DUSTPY PARAMETERS  (✅ SPEED-OPTIMISED for MCMC, Feb 2026)
+# DUSTPY PARAMETERS  
 # =============================================================================
 
-N_SNAPSHOTS = 5   # ✅ SPEED FIX: was 10 → 3 (only need final state for RADMC-3D)
-T_END_YR = 1.0e5  # ✅ SPEED FIX: 100,000 yr — Class 0 age (André+ 2000, Dunham+ 2014)
+N_SNAPSHOTS = 5   
+T_END_YR = 1.0e5  
 DUSTPY_TIMEOUT = 1200  # Max DustPy wall-clock time (40 min; was 20 min)
-DUSTPY_FINAL_TIME = 1.0e5  # ✅ SPEED FIX: was 1e5 → 5e4 yr (Class 0 age)
+DUSTPY_FINAL_TIME = 1.0e5  
 
-# Star parameters (from Phuong+2025 ApJ paper)
-# CRITICAL: T_bol=54K is OUTPUT (observational classification), NOT INPUT!
+
 # For Class 0 protostar embedded in envelope:
 STAR_MASS_MSUN = 0.27      # Solar masses (within paper range 0.15-0.39 Msun from Keplerian analysis)
-STAR_MASS_MIN = 0.15       # Minimum stellar mass constraint [Msun] from paper Section 4.3
-STAR_MASS_MAX = 0.39       # Maximum stellar mass constraint [Msun] from paper Section 4.3
+STAR_MASS_MIN = 0.15       # Minimum stellar mass constraint [Msun]
+STAR_MASS_MAX = 0.39       # Maximum stellar mass constraint [Msun] 
 STAR_TEMP_K = 3000         # Effective temperature [K] for low-mass protostar (INPUT to RADMC3D)
-STAR_LUMI_LSUN = 0.41      # Bolometric luminosity [Lsun] from paper (Phuong+2025)
+STAR_LUMI_LSUN = 0.41      # Bolometric luminosity [Lsun]
 T_BOL_OBSERVED = 54        # Observed bolometric temperature [K] - EXPECTED OUTPUT from SED
 # Radius calculated from L = 4πR²σT⁴: R = sqrt(L/(4πσT⁴))
 # R = sqrt(0.41 * 3.8525e33 / (4π * 5.6703e-5 * 3000⁴)) = 2.38 Rsun (verified)
 STAR_RADIUS_RSUN = 2.38    # Computed to match L_bol = 0.41 Lsun at T_eff = 3000 K
 
 # Observational targets (for validation/comparison)
-OBSERVED_FLUX_1P3MM_MJY = 70.8   # Integrated flux at 1.3mm [mJy] from Table 2
-OBSERVED_FLUX_ERROR_MJY = 0.3    # Flux uncertainty [mJy]
-DISK_MAJOR_AXIS_MAS = 137.9      # Deconvolved major axis [mas] from Table 2
-DISK_MINOR_AXIS_MAS = 93.7       # Deconvolved minor axis [mas] from Table 2
-
+OBSERVED_FLUX_1P3MM_MJY = 70.8   
+OBSERVED_FLUX_ERROR_MJY = 0.3    
+DISK_MAJOR_AXIS_MAS = 137.9     
+DISK_MINOR_AXIS_MAS = 93.7      
 
 # =============================================================================
 # MCMC PARAMETERS TO FIT
 # =============================================================================
 
-# Định nghĩa các parameters cần fit
-# Format: {"name": str, "min": float, "max": float, "default": float, "log_scale": bool}
+
 
 MCMC_PARAMETERS = [
     {
-        # ⚠️ CRITICAL: 'log_mdisk' represents TOTAL DISK (GAS) MASS in DustPy.
-        # Physics correction (16 Jan 2025): M_gas = 10^log_mdisk, M_dust derived from d2g ratio.
-        # Previous interpretation (dust mass) was INCORRECT and broke mass conservation.
-        # DO NOT REVERT to dust mass interpretation - physics logic treats this as GAS mass.
-        # Variable name kept as 'log_mdisk' for HDF5 backend compatibility with existing runs.
-        "name": "log_mdisk",  # Log10 of TOTAL GAS MASS in solar masses (see WARNING above)
+        
+        "name": "log_mdisk",  
         "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",  # ✅ CORRECTED LABEL
-        "min": -3.5,          # ✅ CORRECTED: Realistic gas mass range (M_gas ≥ 0.000316 M☉)
-        "max": -1.5,          # ✅ Upper bound ~0.0316 M☉ (widened for safety)
-        "default": -2.4,      # ✅ UPDATED: Target M_gas ~ 0.015 M_sun (was -2.8)
-        "log_scale": False,   # Already in log space
+        "min": -3.5,         
+        "max": -1.5,         
+        "default": -2.4,      
+        "log_scale": False,   
         "unit": "M_sun",
     },
     {
         "name": "r_c",  # Characteristic radius in AU
         "label": r"$R_c$ (AU)",
-        "min": 10.0,      # ✅ PILOT RUN: Allow compact disks
-        "max": 30.0,      # ✅ PILOT RUN: Wide range to explore
-        "default": 20.0,  # ✅ PILOT RUN: Near observed disk size
+        "min": 10.0,     
+        "max": 30.0,     
+        "default": 20.0,  
         "log_scale": False,  # Linear sampling for this narrow range
         "unit": "AU",
     },
     {
-        "name": "vFrag",  # Fragmentation velocity (cm/s NOT m/s!)
+        "name": "vFrag", 
         "label": r"$v_{\rm frag}$ (cm/s)",
-        "min": 100.0,     # ✅ OPTIMIZED: Narrowed from 10-1000
-        "max": 500.0,     # ✅ Focus on realistic range around 200 cm/s
+        "min": 100.0,    
+        "max": 500.0,     
         "default": 200.0,  # Test showed this works well
         "log_scale": False,  # Linear for narrow range
         "unit": "cm/s",
@@ -243,59 +214,33 @@ MCMC_PARAMETERS = [
     {
         "name": "sigma_exp",  # Surface density power-law exponent (γ)
         "label": r"$\gamma$ (Σ exponent)",
-        "min": 0.5,       # ✅ PILOT RUN: Allow steep profiles
-        "max": 2.5,       # ✅ PILOT RUN: Wide range to explore parameter space
-        "default": 1.6,   # ✅ PILOT RUN: Start near sweet spot
+        "min": 0.5,       
+        "max": 2.5,
+        "default": 1.6,  
         "log_scale": False,
         "unit": "",
-        # PILOT RUN STRATEGY (2026-01-31):
-        # - Range [0.5, 2.5] allows full exploration of steep vs flat profiles
-        # - Default 1.6 starts near sweet spot identified in refinement runs
-        # - 100 steps will identify optimal range for subsequent focused runs
+
     },
-    # ❌ REMOVED: sigma_rc parameter (redundant with r_c, causes degeneracy)
-    # {
-    #     "name": "sigma_rc",  # Critical radius multiplier for surface density
-    #     "label": r"$f_{R_c}$ (radius multiplier)",
-    #     "min": 0.8,       # ✅ REPLACED alpha: Allow r_c variation ±20%
-    #     "max": 1.2,       # ✅ Fast parameter, no DustPy convergence issues
-    #     "default": 1.0,   # Standard r_c (no modification)
-    #     "log_scale": False,  # Linear sampling around 1.0
-    #     "unit": "",
-    # },
+
     {
         "name": "dust_to_gas",  # Dust-to-gas mass ratio
         "label": r"$\epsilon$ (d2g ratio)",
-        "min": 0.001,     # ✅ Depleted disks (settled/grown dust)
-        "max": 0.05,      # ✅ WIDENED: Allow super-ISM enrichment (0.05 = 5× ISM)
+        "min": 0.001,   
+        "max": 0.05,      
         "default": 0.01,  # ISM value
         "log_scale": False,
         "unit": "",
     },
-    # ─── NEW: Viewing geometry parameters (added 2026-02-24) ────────────────────
-    # Motivation: residual map shows a geometric dipole along minor/major axes,
-    # indicating the fixed literature angles (47°, 133.8°) are slightly off.
-    # Freeing these two angles lets the MCMC absorb the projection mismatch.
+
     {
-        "name": "inclination",   # Disk inclination [degrees]
-        "label": r"$i$ (°)",
-        "min": 35.0,   # Well below literature value 47° (allows ~12° slack)
-        "max": 60.0,   # Well above literature value 47°
-        "default": 47.0,  # Literature: cos⁻¹(94/138) ≈ 47° (Phuong+2025)
+        "name": "r_in",          # Inner cavity (dust depletion) radius [AU]
+        "label": r"$R_{\rm in}$ (AU)",
+        "min": 1.0,   # Minimum: ~1 AU (sub-beam but affects thermal structure)
+        "max": 10.0,  # Maximum: ~10 AU (ALMA beam at 156 pc ≈ 8 AU, stay resolvable)
+        "default": 3.0,  # Starting guess: moderate inner clearing
         "log_scale": False,
-        "unit": "deg",
+        "unit": "AU",
     },
-    {
-        "name": "posang",        # Disk position angle on sky [degrees]
-        "label": r"PA (°)",
-        "min": 120.0,  # 133.8° − 13.8° lower slack
-        "max": 150.0,  # 133.8° + 16.2° upper slack
-        "default": 133.8,  # Current best estimate (PA_OBS_DEG)
-        "log_scale": False,
-        "unit": "deg",
-    },
-    # REMOVED: r_in parameter (now FIXED at 0.1 AU in forward_simulator.py)
-    # Was 1.0 AU, updated to 0.1 AU for proper temperature structure at inner disk
 ]
 
 # Số parameters
@@ -327,17 +272,16 @@ else:
 # MCMC SAMPLER SETTINGS
 # =============================================================================
 
-# ✅ OPTIMIZED based on test results (5.2 min/simulation):
-# Updated for 7 parameters (was 4)
-# Number of walkers (user requested: 7 walkers × 2 = 14 total)
-N_WALKERS = 15  # Use 7 user-specified walkers × 2 = 14 total walkers
 
-# Number of steps - QUICK TEST for resource optimization
-N_STEPS_BURNIN = 0       # ✅ No burn-in needed for geometry test
-N_STEPS_PRODUCTION = 200  # ✅ GEOMETRY TEST: 200 steps to check incl/posang convergence
+# Number of walkers (user requested: 7 walkers × 2 = 14 total)
+N_WALKERS = 15  # 6 params × 2 = 12 minimum; 15 gives extra diversity
+
+
+N_STEPS_BURNIN = 0      
+N_STEPS_PRODUCTION = 200 
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
-# Thinning (save every Nth sample to reduce autocorrelation)
+
 THIN_BY = 1  # Keep all samples initially, can increase if autocorrelation high
 
 # Parallel processing
@@ -346,19 +290,15 @@ import multiprocessing
 # Tự động lấy số luồng CPU của máy
 TOTAL_CORES = multiprocessing.cpu_count()
 
-# An toàn: Chừa lại 2 luồng để chạy Windows/VSCode mượt mà
-# Ví dụ: Máy 16 luồng -> dùng 14. Máy 4 luồng -> dùng 2.
+
 SAFE_CORES = max(1, TOTAL_CORES - 4) 
 
-# Tính toán số lượng Process tối ưu
-# ✅ UPGRADED (2026-02-18): 5 processes for 10 walkers (2 walkers/process)
-# RAM budget: 5 × ~1.2 GB/worker = ~6 GB peak + ~1.5 GB OS = ~7.5 GB < 9 GB
-# Dynamic RAM Guardian in ram_guardian.py protects against OOM
+
 N_PROCESSES = 5  # 5 parallel DustPy+RADMC-3D workers
 
 USE_MULTIPROCESSING = True
 # Checkpoint frequency
-CHECKPOINT_INTERVAL = 5  # ✅ Save every 5 steps
+CHECKPOINT_INTERVAL = 5  
 
 # Convergence criteria
 MIN_AUTOCORR_TIMES = 50  # Minimum number of autocorrelation times
@@ -376,7 +316,6 @@ MASK_THRESHOLD_SIGMA = 3.0  # Only fit pixels above N*sigma in observation
 # Prior types: "uniform", "gaussian", "log-uniform"
 PRIOR_TYPE = "uniform"  # Default uniform priors within bounds
 
-# ✅ OPTIMIZED: No custom priors, let the data speak (Uniform Priors only)
 CUSTOM_PRIORS = {}
 
 
@@ -464,21 +403,7 @@ COMPARISON_PLOT_FILE = os.path.join(MCMC_OUTPUT_DIR, "obs_vs_model.png")
 # =============================================================================
 
 def get_initial_positions(n_walkers=N_WALKERS, scale=0.1):
-    """
-    Tạo initial positions cho MCMC walkers.
     
-    Parameters:
-    -----------
-    n_walkers : int
-        Number of walkers
-    scale : float
-        Fractional perturbation scale (0.1 = 10% of parameter range)
-    
-    Returns:
-    --------
-    positions : ndarray
-        Initial positions with shape (n_walkers, n_params)
-    """
     positions = []
     for _ in range(n_walkers):
         pos = []
@@ -571,3 +496,16 @@ if __name__ == "__main__":
     pos = get_initial_positions(n_walkers=4)
     print(f"Generated {len(pos)} walker positions with {len(pos[0])} parameters each")
     print(f"Example walker #1: {params_to_dict(pos[0])}")
+
+
+
+
+
+
+
+
+
+
+
+
+
