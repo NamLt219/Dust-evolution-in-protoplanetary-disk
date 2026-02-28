@@ -1,20 +1,7 @@
-"""
-MCMC Pipeline Main Runner (The Orchestrator - Bulletproof Version)
-=================================================================
-Tính năng an toàn cao cấp:
-- System Health Check (RAM/Disk)
-- Crash Dump Reporting
-- Graceful Shutdown
-- Safe Multiprocessing
-
-Author: Gemini Senior Dev & Professor
-Date: 2025-12-21
-"""
-
 import os
 import sys
 import shutil
-import psutil  # Cần cài: pip install psutil (Không có cũng không sao, code tự xử lý)
+import psutil  
 import numpy as np
 import matplotlib.pyplot as plt
 from multiprocessing import set_start_method
@@ -54,7 +41,7 @@ class MCMCPipeline:
             console_level="INFO",
             file_level="DEBUG"
         )
-        # ✅ CRITICAL: print absolute log path IMMEDIATELY so it survives any crash
+        
         log_path = os.path.abspath(self.logger.log_file) if self.logger.log_file else "<console only>"
         print(f"📝 CRITICAL: Log file is being written to: {log_path}", flush=True)
 
@@ -62,7 +49,7 @@ class MCMCPipeline:
         self.logger.info("🛡️  MCMC PIPELINE ORCHESTRATOR (SAFE MODE) STARTED")
         self.logger.info("="*80)
         
-        # System Health Check ngay khi khởi động
+      
         self._check_system_health()
 
         self.obs_data = None
@@ -129,8 +116,7 @@ class MCMCPipeline:
         try:
             self.simulator = ForwardModelSimulatorV2(cleanup=True)
             
-            # ✅ CRITICAL FIX: Pass beam parameters for correlation correction
-            # Calculate pixel scale from observation FITS
+     
             pixel_scale_arcsec = IMAGE_SIZE_AU / IMAGE_NPIX / DISTANCE_PC  # arcsec/pixel
             
             self.likelihood = LikelihoodCalculator(
