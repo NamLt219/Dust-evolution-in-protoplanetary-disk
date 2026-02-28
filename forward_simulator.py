@@ -1,28 +1,3 @@
-"""
-Forward Model Simulator V2: Fixed RADMC3D Pipeline
-===================================================
-FIXES APPLIED:
-1. ✅ nphi = 64 (was 1) - Proper azimuthal resolution
-2. ✅ Use radmc3dPy for image generation and beam convolution
-3. ✅ nphot = 500,000 (was 100,000) - Better Monte Carlo statistics
-4. ✅ Grid refinement at inner edge (12 levels, 3 span)
-5. ✅ scipy.interpolate.interp1d for smooth density interpolation
-6. ✅ Python rotation for PA alignment (more reliable than RADMC-3D posang)
-
-ADAPTED FOR MCMC:
-- Isolated working directories per walker
-- Proper cleanup after each iteration
-- Memory management for long runs
-- Thread-safe operations
-
-Based on reference implementation:
-- problem_setup_origin.py (grid setup and density)
-- plot_images.py (radmc3dPy usage and convolution)
-
-Author: Pipeline V2
-Date: 2025-12-03
-"""
-
 import os
 import sys
 import shutil
@@ -48,7 +23,7 @@ try:
 except ImportError:
     RAM_GUARDIAN_AVAILABLE = False
 
-# Try to import radmc3dPy (required for proper image generation)
+
 try:
     from radmc3dPy.image import makeImage, readImage
     RADMC3DPY_AVAILABLE = True
@@ -80,7 +55,7 @@ try:
     STAR_RADIUS_RSUN = config.STAR_RADIUS_RSUN
     STAR_TEMP_K = config.STAR_TEMP_K
     STAR_LUMI_LSUN = getattr(config, 'STAR_LUMI_LSUN', 0.41)  # Default from paper
-    RMS_NOISE_JY = config.RMS_NOISE_JY  # ✅ FIX: was missing — caused NameError at safety check
+    RMS_NOISE_JY = config.RMS_NOISE_JY 
     OBSERVED_FLUX_1P3MM_MJY = getattr(config, 'OBSERVED_FLUX_1P3MM_MJY', 70.8)  # 70.8 mJy
 except Exception as e:
     print(f"Error importing config: {e}")
@@ -109,22 +84,7 @@ pi = np.pi
 
 
 def grid_refine_inner_edge(x_orig, nlev, nspan):
-    """
-    Grid refinement function from problem_setup_origin.py
-    
-    Parameters:
-    -----------
-    x_orig : array
-        Original grid points
-    nlev : int
-        Number of refinement levels
-    nspan : int
-        Number of cells to refine at each level
-    
-    Returns:
-    --------
-    array : Refined grid
-    """
+
     x = x_orig.copy()
     rev = x[0] > x[1]
     for ilev in range(nlev):
@@ -138,20 +98,7 @@ def grid_refine_inner_edge(x_orig, nlev, nspan):
 
 
 class ForwardModelSimulatorV2:
-    """
-    V2 Forward Model Simulator with fixed RADMC3D pipeline.
-    
-    Key improvements:
-    - Proper azimuthal resolution (nphi=64)
-    - radmc3dPy integration
-    - Higher nphot for better accuracy
-    - Grid refinement at inner edge
-    - Smooth interpolation
-    
-    ⚠️ CRITICAL: This class must be picklable for multiprocessing!
-    Logger is created on-demand via property (not stored as instance variable)
-    """
-    
+
     def __init__(self, config_dict: Optional[Dict] = None, cleanup: bool = True):
         """Initialize simulator with optional config override."""
         # ❌ REMOVED: self.logger = get_logger() (causes pickling error)
@@ -166,7 +113,7 @@ class ForwardModelSimulatorV2:
         self.work_dir = Path(WORK_DIR)
         self.radmc3d_exec = RADMC3D_EXECUTABLE
         self.opacity_file = RADMC3D_OPACITY_FILE
-        self._cleanup = cleanup  # ✅ ADD cleanup flag
+        self._cleanup = cleanup 
         
         self._log_info("ForwardModelSimulatorV2 initialized with FIXED pipeline")
         self._log_info(f"  - nphi = 64 (proper azimuthal resolution)")
@@ -219,25 +166,7 @@ class ForwardModelSimulatorV2:
         # No need to recreate logger - it's now a @property
     
     def simulate(self, params: Dict[str, float], keep_dir: bool = False) -> Tuple[bool, Optional[np.ndarray], Optional[Dict], Optional[Path]]:
-        """
-        Main simulation pipeline.
-        
-        Parameters:
-        -----------
-        params : dict
-            MCMC parameters (log_mdisk, r_c, vFrag, sigma_exp, dust_to_gas)
-        keep_dir : bool
-            If True, do NOT cleanup sim_dir (for best-fit preservation)
-        
-        Returns:
-        --------
-        success : bool
-            Whether simulation succeeded
-        image : np.ndarray or None
-            Synthetic image [IMAGE_NPIX x IMAGE_NPIX] in Jy/beam
-        metadata : dict or None
-            Simulation metadata (params, shape, directories, etc.)
-        """
+      
         self._log_info(f"Starting simulation with params: {params}")
         
         # RAM Guardian: Wait if system memory is critically low
@@ -254,15 +183,15 @@ class ForwardModelSimulatorV2:
             self._log_debug("Step 1/4: Running DustPy simulation")
             dustpy_success, dustpy_output = self._run_dustpy(sim_dir, params)
             if not dustpy_success:
-                return False, None
+                return False, None, None  # ✅ consistent 3-value interface
             
-            # STEP 2: Convert to RADMC3D format (FIXED VERSION)
+           
             self._log_debug("Step 2/4: Converting to RADMC3D (V2 with fixes)")
             radmc_dir = sim_dir / "radmc3d_work"
             radmc_dir.mkdir(exist_ok=True)
             self._convert_dustpy_to_radmc3d_v2(dustpy_output, radmc_dir, params)
             
-            # STEP 3: Run RADMC3D with radmc3dPy (FIXED VERSION)
+            
             self._log_debug("Step 3/4: Running RADMC3D (V2 with radmc3dPy)")
             image = self._run_radmc3d_v2(radmc_dir, params)
             
@@ -306,7 +235,7 @@ class ForwardModelSimulatorV2:
                 'params': params.copy(),
                 'image_shape': image.shape,
                 'dustpy_dir': str(sim_dir),
-                'sim_dir': str(sim_dir),  # ✅ Encapsulate sim_dir in metadata
+                'sim_dir': str(sim_dir), 
                 'integrated_flux_mjy': float(np.sum(image) * 
                     ((IMAGE_SIZE_AU / IMAGE_NPIX / DISTANCE_PC * np.pi / (180.0 * 3600.0))**2) /
                     ((np.pi / (4.0 * np.log(2.0))) * 
@@ -315,11 +244,11 @@ class ForwardModelSimulatorV2:
                 'success': True
             }
             
-            return True, image, metadata  # ✅ RESTORED: 3-value interface (sim_dir in metadata)
+            return True, image, metadata  
             
         except Exception as e:
             self._log_error(f"Simulation failed: {e}", exception=e)
-            return False, None, None  # ✅ RESTORED: 3-value interface
+            return False, None, None 
         
         finally:
             # Cleanup - RESPECT self._cleanup flag
@@ -332,33 +261,10 @@ class ForwardModelSimulatorV2:
             gc.collect()
     
     def forward_model(self, params: Dict[str, float]) -> Tuple[bool, Optional[np.ndarray], Optional[Dict]]:
-        """
-        Alias for simulate() - for backward compatibility and intuitive naming.
-        
-        Both names work:
-        - simulator.simulate(params)      ← Official name
-        - simulator.forward_model(params) ← Intuitive alias
-        
-        Returns: (success, image, metadata)
-        """
         return self.simulate(params)
     
     def _run_dustpy(self, sim_dir: Path, params: Dict[str, float]) -> Tuple[bool, Optional[Dict]]:
-        """
-        Run DustPy simulation with 5 FREE parameters (sigma_rc removed to eliminate degeneracy).
-        
-        Free parameters:
-            log_mdisk, r_c, vFrag, sigma_exp, dust_to_gas
-        
-        Fixed parameters:
-            r_in=0.5 AU, alpha=1e-3
-        
-        CRITICAL NOTE: 'log_mdisk' represents TOTAL DISK MASS (gas-dominated).
-              For a typical disk: M_total ≈ M_gas (since dust << gas).
-              Physical constraint: M_disk << M_star to avoid gravitational instability.
-              Dust mass is derived: M_dust = M_gas × dust_to_gas.
-              Do NOT rename variable to maintain HDF5 backend compatibility.
-        """
+  
         try:
             # Extract parameters (with defaults)
             log_mdisk = params.get('log_mdisk', -2.0)  # TOTAL/GAS mass (see docstring NOTE)
@@ -366,21 +272,16 @@ class ForwardModelSimulatorV2:
             vFrag = params.get('vFrag', 200.0)
             sigma_exp = params.get('sigma_exp', 1.0)
             dust_to_gas = params.get('dust_to_gas', 0.01)
-            r_in = 2.0  # ✅ FLUX FIX: 2.0 AU inner cavity (model was 6× too bright at 0.5 AU;
-                       #    ALMA beam ~8 AU at 156 pc so inner cavity is sub-beam — safe)
+            r_in = params.get('r_in', 3.0)  # Inner cavity radius [AU] — free MCMC parameter
             
-            # ❌ REMOVED: sigma_rc (redundant with r_c, causes degeneracy)
-            # Now using 5 free parameters + 2 fixed
-            
-            # PHYSICS: log_mdisk represents TOTAL DISK MASS (gas-dominated)
-            # M_total ≈ M_gas (since gas >> dust)
+         
             M_gas = 10**log_mdisk * c.M_sun  # Gas mass (primary)
             M_dust = M_gas * dust_to_gas      # Dust mass (derived from gas)
             
             self._log_debug(f"🔍 DEBUG: Initializing DustPy with M_gas={M_gas/c.M_sun:.4e} M☉, M_dust={M_dust/c.M_sun:.4e} M☉")
             self._log_debug(f"         Ratio: M_disk/M_star = {M_gas/(STAR_MASS_MSUN*c.M_sun):.3f} (should be << 1)")
             
-            R_c = r_c * c.au  # ✅ Direct r_c, no multiplier
+            R_c = r_c * c.au 
             R_in = r_in * c.au
             
             # Create DustPy simulation
@@ -392,40 +293,46 @@ class ForwardModelSimulatorV2:
             sim.ini.star.T = STAR_TEMP_K
             
             # Disk properties
-            sim.ini.gas.Mdisk = M_gas  # ✅ FIXED: Use gas mass, not dust mass!
-            sim.ini.gas.SigmaRc = R_c  # ✅ Uses scaled r_c
+            sim.ini.gas.Mdisk = M_gas 
+            sim.ini.gas.SigmaRc = R_c 
             sim.ini.gas.SigmaExp = -sigma_exp
-            sim.ini.gas.alpha = 1.0e-3  # ✅ FIXED at standard MRI value
+            sim.ini.gas.alpha = 1.0e-3  
             
-            # ✅ NEW: Set inner radius (modify grid)
+           
             # DustPy default grid: [r_in, r_out] with logarithmic spacing
             sim.ini.grid.rmin = R_in  # Inner edge
             # Outer radius scaled with r_c
-            sim.ini.grid.rmax = max(300 * c.au, 6 * R_c)  # ✅ SPEED FIX: 300 AU floor (was 500), 6× R_c (was 10×)
+            sim.ini.grid.rmax = max(300 * c.au, 6 * R_c) 
             
             # Dust properties
             sim.ini.dust.aIniMax = 0.001  # cm - Initial max grain size
             sim.ini.dust.vFrag = vFrag  # cm/s
             
-            # ✅ CRITICAL FIX: Limit maximum grain size to prevent unrealistic growth
-            # For Class 0/I disks: grains typically don't exceed ~1 cm
-            # This prevents St >> 1 and keeps physics realistic
-            # a_max = 1 cm → m_max = 6.995 g (for rho_s = 1.67 g/cm³)
+         
             sim.ini.grid.mmax = 7.0  # g - Maximum particle mass (= 1 cm size)
             
-            # ✅ NEW: Dust-to-gas ratio
-            # This affects initial dust surface density
-            # DustPy will evolve this, but we set the initial ratio
-            sim.ini.dust.d2gRatio = dust_to_gas  # ✅ FIXED: Correct attribute name
+        
+            sim.ini.dust.d2gRatio = dust_to_gas  
             
             # Initialize
             sim.initialize()
+
             
-            # Setup snapshots
-            # ✅ SPEED FIX: Class 0 age ~50 kyr (André et al. 2000; Dunham et al. 2014)
-            #   - Old: 10 snapshots to 100,000 yr → excessive I/O + evolution time
-            #   - New: 3 snapshots to 50,000 yr → captures dust growth + drift at Class 0 age
-            #   - Combined with r_in=0.5 AU, expected speedup: ~20-50×
+            if r_in > 0:
+                # R_in and width are both in cm (R_in = r_in * c.au set above)
+                # sim.grid.r is a simframe Field in cm — cast to plain ndarray
+                # to avoid Field-operator edge cases in the arithmetic.
+                r_grid = np.array(sim.grid.r)   # shape (Nr,), units: cm
+                width  = 0.15 * R_in            # 15% of R_in [cm]
+                cavity_profile = 0.5 * (1.0 + np.tanh((r_grid - R_in) / width))
+                cavity_profile = np.maximum(cavity_profile, 1e-6)  # floor at 1e-6
+                sim.gas.Sigma   *= cavity_profile           # 1D: shape (Nr,)
+                sim.dust.Sigma  *= cavity_profile[:, None]  # 2D: shape (Nr, Nm) broadcast
+               
+                sim.update()
+                self._log_info(f"Cavity carved (+ update): r_in={r_in:.2f} AU, width={width/c.au:.2f} AU, floor=1e-6")
+
+            
             N_SNAPSHOTS = getattr(config, 'N_SNAPSHOTS', 3)  # Default reduced 10→3
             T_END_YR = getattr(config, 'T_END_YR', 5.0e4)   # 50,000 yr (Class 0)
             sim.t.snapshots = np.hstack([
@@ -597,80 +504,16 @@ class ForwardModelSimulatorV2:
                                        dustpy_output: Dict,
                                        radmc_dir: Path,
                                        params: Dict[str, float]):
-        """
-        Convert DustPy output to RADMC3D input files.
-        
-        Parameters
-        ----------
-        dustpy_output : dict
-            DustPy simulation results containing:
-                - 'r' : ndarray, shape (Nr,)
-                    Radial grid [cm]
-                - 'sigma_dust' : ndarray, shape (Nr,)
-                    Dust surface density [g/cm²]
-                - 'sigma_gas' : ndarray, shape (Nr,)
-                    Gas surface density [g/cm²]
-                - 'scale_height' : ndarray, shape (Nr,)
-                    Pressure scale height H [cm]
-                - 'temperature' : ndarray, shape (Nr,)
-                    Midplane temperature [K]
-        radmc_dir : Path
-            Directory for RADMC-3D input/output files
-        params : dict
-            MCMC parameters (for metadata/logging)
-        
-        Returns
-        -------
-        None
-            Creates RADMC-3D input files in radmc_dir:
-                - amr_grid.inp (spherical grid structure)
-                - dust_density.inp (3D dust density)
-                - wavelength_micron.inp (wavelength grid)
-                - stars.inp (stellar properties)
-                - dustopac.inp (opacity table references)
-                - radmc3d.inp (runtime parameters)
-        
-        Notes
-        -----
-        Implements dynamic grid boundary using cumulative mass fraction method:
-        Outer radius is set where 99.9% of dust mass is enclosed, with a 1.2×
-        safety factor. This replaces the older density-threshold method which
-        could miss mass in extended low-density tails.
-        
-        Grid refinement (12 levels, 3 span) applied at inner edge for better
-        resolution of temperature gradient and density structure.
-        
-        References
-        ----------
-        .. [1] RADMC-3D Manual Section 7.1: "Grid must encompass all significant emission"
-        .. [2] Dullemond et al. (2012): RADMC-3D: A multi-purpose radiative transfer tool
-        
-        ✅ FIX 1: nphi = 64 (was 1)
-        ✅ FIX 4: Grid refinement at inner edge
-        ✅ FIX 5: scipy.interpolate.interp1d for density
-        ✅ CRITICAL FIX C2: Dynamic outer boundary matching DustPy extent
-        ✅ CRITICAL FIX C3: Cumulative mass fraction method (99.9% containment)
-        """
+
         self._log_debug("Converting DustPy → RADMC3D (V2 with fixes)")
         
         # ===== GRID SETUP (matching problem_setup_origin.py) =====
         
         # Radial grid
         nr = 100
-        # ✅ FLUX FIX: Match DustPy inner radius (r_in=2.0 AU)
         rin = 2.0 * au  # 2.0 AU — matches DustPy r_in; sub-beam at ALMA resolution (beam ~8 AU)
         
-        # ===== CRITICAL FIX C3: CUMULATIVE MASS FRACTION BOUNDARY =====
-        # Problem: Density-threshold (Σ < 10⁻⁴ Σ_peak) + 1.2× safety factor
-        #   was too tight — missed ~6.6% of mass when DustPy spreads dust
-        #   to large radii with low but non-negligible surface density.
-        #
-        # New approach: Find radius enclosing 99.9% of cumulative dust mass.
-        #   M(r) = ∫₀ʳ 2πr'Σ(r')dr'
-        #   r_999 = r where M(r)/M_total ≥ 0.999
-        #   rout  = 1.2 × r_999  (safety margin for numerical interpolation)
-        #
-        # This is robust regardless of density profile shape.
+
         
         r_dustpy = dustpy_output['r']
         sigma_dustpy = dustpy_output['sigma_dust']
@@ -720,7 +563,7 @@ class ForwardModelSimulatorV2:
         # Initial grid
         ri = np.logspace(np.log10(rin), np.log10(rout), nr+1)
         
-        # ✅ FIX 4: Grid refinement at inner edge
+ 
         ri = grid_refine_inner_edge(ri, nlev=12, nspan=3)
         rc = 0.5 * (ri[:-1] + ri[1:])
         nr = len(rc)  # Update nr after refinement
@@ -732,7 +575,7 @@ class ForwardModelSimulatorV2:
         thetai = np.linspace(thetaup, 0.5 * np.pi, ntheta + 1)
         thetac = 0.5 * (thetai[:-1] + thetai[1:])
         
-        # ✅ FIX 1: Phi grid - CRITICAL!
+        
         nphi = 64  # Was 1 - this is THE MAIN FIX!
         phii = np.linspace(0.0, 2 * np.pi, nphi + 1)
         phic = 0.5 * (phii[:-1] + phii[1:])
@@ -741,7 +584,7 @@ class ForwardModelSimulatorV2:
         
         # ===== DENSITY INTERPOLATION =====
         
-        # ✅ FIX 5: Use scipy interp1d for smooth interpolation
+
         r_dustpy_au = dustpy_output['r'] / au
         sigma_dustpy = dustpy_output['sigma_dust']
         H_dustpy = dustpy_output['scale_height']
@@ -755,8 +598,7 @@ class ForwardModelSimulatorV2:
             bounds_error=False
         )
         
-        # Match lengths for H interpolation
-        # Handle case where DustPy output has 2D arrays (Nr, Nm) or mismatched shapes
+
         if len(H_dustpy.shape) == 2:
             # If H is 2D, take radial average or first grain size
             H_dustpy_1d = H_dustpy.mean(axis=1) if H_dustpy.shape[1] > 1 else H_dustpy[:, 0]
@@ -769,7 +611,7 @@ class ForwardModelSimulatorV2:
         sigma_dustpy_matched = sigma_dustpy[:min_len]
         H_dustpy_matched = H_dustpy_1d[:min_len]
         
-        # ✅ FIXED: Check for extrapolation range before interpolating
+      
         r_dustpy_min = r_dustpy_au_matched.min()
         r_dustpy_max = r_dustpy_au_matched.max()
         
@@ -793,7 +635,7 @@ class ForwardModelSimulatorV2:
         # Evaluate on RADMC3D grid (rc has been updated after refinement)
         r_au_grid = rc / au
         
-        # ✅ Safety check: Warn if extrapolating significantly beyond DustPy range
+        
         r_radmc_min = r_au_grid.min()
         r_radmc_max = r_au_grid.max()
         
@@ -858,17 +700,7 @@ class ForwardModelSimulatorV2:
         sigmad = sigma_interp(r_au_grid)
         hp = H_interp(r_au_grid)
         hpr = hp / rc
-        
-        # ===== FLARING OVERRIDE: Enforce ψ ≥ 1.3 =====
-        # DustPy often gives flat or weakly flared disks (ψ ~ 1.0-1.1)
-        # For Class 0/I embedded disks, ψ ≥ 1.2-1.3 is expected from 
-        # irradiation heating (Chiang & Goldreich 1997, D'Alessio+1998)
-        #
-        # Method: Measure DustPy's ψ via power-law fit to H(r)/r
-        # If ψ < PSI_MIN, re-scale H(r) to enforce flaring while
-        # preserving the absolute H at a reference radius r_ref
-        #
-        # H_new(r) = H(r_ref) × (r/r_ref)^ψ_min
+
         PSI_MIN = 1.3  # Minimum flaring index
         
         # Measure current flaring index from DustPy output
@@ -908,10 +740,7 @@ class ForwardModelSimulatorV2:
         # Create 3D meshgrid
         rr, tt, pp = np.meshgrid(rc, thetac, phic, indexing='ij')
         
-        # ✅ FIXED: Convert colatitude θ to height z
-        # tt is colatitude from pole: 0 at pole, π/2 at midplane
-        # zr_angle = π/2 - tt is angle from midplane
-        # z = r * sin(zr_angle) is actual vertical height
+
         zr_angle = np.pi/2.0 - tt  # Angle from midplane [radians]
         zz = rr * np.sin(zr_angle)  # Actual height z = r*sin(angle) [cm]
         
@@ -919,9 +748,7 @@ class ForwardModelSimulatorV2:
         sigmad_3d = sigmad[:, None, None] * np.ones((1, ntheta, nphi))
         hh = hp[:, None, None] * np.ones((1, ntheta, nphi))  # H in cm
         
-        # ✅ FIXED: Gaussian vertical profile using actual height z
-        # ρ(r,z) = Σ(r) / (√(2π) H(r)) * exp(-z²/(2H²))
-        # Use H (not H/r) since we have actual height z (not z/r)
+
         rhod = (sigmad_3d / (np.sqrt(2.0 * np.pi) * hh)) * np.exp(-zz**2 / (2.0 * hh**2))
         
         # Ensure non-negative and reasonable values
@@ -1030,42 +857,7 @@ class ForwardModelSimulatorV2:
         self._log_debug(f"RADMC3D input files created in {radmc_dir} (nphot={nphot})")
     
     def _run_radmc3d_v2(self, radmc_dir: Path, params: Dict[str, float]) -> Optional[np.ndarray]:
-        """
-        Run RADMC3D V6 - SCIENTIFICALLY CORRECT ANGLE HANDLING.
-        
-        ====================================================================
-        SCIENTIFIC UNDERSTANDING:
-        ====================================================================
-        
-        1. THE DISK MODEL IS AXISYMMETRIC:
-           - DustPy creates an axisymmetric disk (no azimuthal structure)
-           - The density distribution only depends on (r, z), not phi
-           - Therefore, changing phi in RADMC-3D does NOT change the image
-        
-        2. WHAT THE ANGLES MEAN IN RADMC-3D:
-           - incl: Inclination of the line of sight (60° for IRAS 04166)
-           - phi: Azimuthal position of observer (irrelevant for axisymmetric disk)
-           - posang: Rotates the camera/image (NOT the physical disk)
-        
-        3. POSITION ANGLE (PA) IN ASTRONOMY:
-           - PA is the angle of the disk major axis measured N through E
-           - It describes HOW WE SEE the disk, not the disk's physical structure
-           - For an axisymmetric disk, PA is purely a projection effect
-        
-        4. CORRECT APPROACH FOR COMPARISON WITH OBSERVATIONS:
-           - Generate model image with incl=47°, phi=0, posang=0
-           - This produces a disk with major axis along x-axis (PA ~ 90°)
-           - ROTATE THE IMAGE AFTER GENERATION to match observation PA
-           - This is the standard practice in astronomical modeling
-        
-        5. WHY ROTATE THE IMAGE (not use posang):
-           - posang rotates the camera, which can cause edge effects
-           - Image rotation preserves the square image format
-           - This allows direct pixel-by-pixel comparison with observations
-           - The physics is the same - it's just a coordinate transformation
-        
-        ====================================================================
-        """
+ 
         self._log_debug("Running RADMC3D V6 (Scientifically Correct)")
         
         original_dir = os.getcwd()
@@ -1083,14 +875,10 @@ class ForwardModelSimulatorV2:
                 BEAM_MAJOR_ARCSEC, BEAM_MINOR_ARCSEC, BEAM_PA_DEG, DISTANCE_PC
             )
 
-            # ── Resolve inclination and PA from walker params (if free) ─────────
-            # When 'inclination' and/or 'posang' are MCMC free parameters, the
-            # walker proposes new values each step via the params dict.
-            # Fall back to config constants for backward-compatible fixed runs.
-            incl_value   = float(params.get("inclination", INCLINATION_DEG))
-            pa_obs_value = float(params.get("posang",      PA_OBS_DEG))
-            # RADMC-3D posang = PA_obs - 90°  (camera rotation, N→E CCW)
-            posang_value = pa_obs_value - 90.0
+ 
+            incl_value   = INCLINATION_DEG         
+           
+            posang_value = PA_OBS_DEG - 90.0        # Fixed: PA_OBS_DEG - 90°
 
             # 1. RUN MCTHERM (thermal Monte Carlo)
             subprocess.run(
@@ -1100,16 +888,11 @@ class ForwardModelSimulatorV2:
                 timeout=SIMULATION_TIMEOUT
             )
 
-            # 2. GENERATE IMAGE
-            # ─────────────────────────────────────────────────────────────────
-            # incl     : disk inclination — now a free MCMC parameter
-            # posang   : camera rotation = PA_obs − 90°  — now a free MCMC parameter
-            # phi = 0  : irrelevant for axisymmetric disk
-            # ─────────────────────────────────────────────────────────────────
+            
             self._log_info(f"RADMC-3D Image Generation:")
-            self._log_info(f"  incl: {incl_value}° (disk inclination)")
+            self._log_info(f"  incl: {incl_value}° (disk inclination, fixed)")
             self._log_info(f"  phi: 0° (irrelevant for axisymmetric disk)")
-            self._log_info(f"  posang: {posang_value}° (to get PA={pa_obs_value}° on sky)")
+            self._log_info(f"  posang: {posang_value}° → PA={PA_OBS_DEG}° on sky (fixed)")
             self._log_info(f"  → Direct posang rotation (no post-processing needed)")
 
             sizeau_radius = IMAGE_SIZE_AU / 2.0
@@ -1154,16 +937,6 @@ class ForwardModelSimulatorV2:
             # Extract Data
             image_data = cim.imageJyppix.squeeze()
             
-            # 5. COMPUTE INTEGRATED FLUX DENSITY
-            # ========================================================================
-            # F_total = Σ(I_i) × Ω_pixel / Ω_beam
-            # where I_i is in Jy/pixel (imageJyppix), Ω_pixel and Ω_beam are solid angles
-            #
-            # For imageJyppix: already in Jy/pixel after convolution
-            # Integrated flux = sum of all pixel values × (pixel_area / beam_area)
-            # But cim.imageJyppix is convolved → units are Jy/beam per pixel
-            # So: F_total = Σ(image_Jy/beam) × Ω_pixel / Ω_beam
-            # ========================================================================
             pixel_scale_arcsec = (IMAGE_SIZE_AU / IMAGE_NPIX) / DISTANCE_PC  # arcsec/pixel
             pixel_area_sr = (pixel_scale_arcsec * np.pi / (180.0 * 3600.0))**2  # sr
             beam_area_sr = (np.pi / (4.0 * np.log(2.0))) * \
@@ -1181,7 +954,7 @@ class ForwardModelSimulatorV2:
             
             # 6. IMAGE ALREADY HAS CORRECT PA (from posang parameter)
             # ========================================================================
-            # RADMC-3D generated image with posang={posang_value}°
+            # RADMC-3D generated image with posang={posang_value}° (PA={PA_OBS_DEG}°)
             # No post-processing rotation needed!
             # Image already has PA ~ {PA_OBS_DEG}° on sky
             # ========================================================================
@@ -1283,11 +1056,7 @@ class ForwardModelSimulatorV2:
                 image_data = np.array(image_data)
                 image_data = image_data.reshape((ny, nx))
             
-            # Manual Gaussian beam convolution (basic)
-            # ✅ UNIT FIX: image.out is in erg/cm²/s/Hz/ster (specific intensity)
-            # Convert to Jy/pixel:
-            #   1 Jy = 1e-23 erg/cm²/s/Hz
-            #   pixel solid angle = (pixel_scale_rad)² sr
+           
             pixel_scale_as = (IMAGE_SIZE_AU / IMAGE_NPIX) / DISTANCE_PC  # arcsec/pixel
             pixel_scale_rad = pixel_scale_as * (np.pi / 648000.0)         # rad/pixel
             pixel_sr = pixel_scale_rad ** 2                                # sr/pixel
@@ -1320,3 +1089,9 @@ class ForwardModelSimulatorV2:
 # ===== BACKWARDS COMPATIBILITY =====
 # Keep old class name as alias for seamless replacement in MCMC code
 ForwardModelSimulator = ForwardModelSimulatorV2
+
+
+
+
+
+
