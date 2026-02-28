@@ -511,7 +511,10 @@ class ForwardModelSimulatorV2:
         
         # Radial grid
         nr = 100
-        rin = 2.0 * au  # 2.0 AU — matches DustPy r_in; sub-beam at ALMA resolution (beam ~8 AU)
+        mcmc_rin_au = params.get('r_in', 1.0)
+        rin_au = max(0.1, mcmc_rin_au * 0.5)
+        rin = rin_au * au
+        self._log_debug(f"Dynamic RADMC-3D grid rin set to {rin_au:.3f} AU (MCMC r_in = {mcmc_rin_au:.3f} AU)")
         
 
         
