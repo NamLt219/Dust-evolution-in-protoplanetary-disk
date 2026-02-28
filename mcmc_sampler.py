@@ -1,20 +1,3 @@
-"""
-MCMC Sampler using emcee with HDF5 Backend
-============================================
-✅ OPTIMIZED VERSION: Zero-RAM growth với HDF5 Backend
-
-Features:
-- ✅ HDF5 Backend: Ghi thẳng xuống đĩa, RAM luôn trống
-- ✅ Auto Resume: Chạy tiếp từ file .h5 khi crash/stop
-- ✅ Real-time Access: Đọc kết quả khi đang chạy
-- ✅ Convergence diagnostics
-- ✅ Parallel execution
-- ✅ Comprehensive logging
-
-Author: Pipeline Builder + HDF5 Integration
-Date: 2025-12-12 (Updated)
-"""
-
 import numpy as np
 import emcee
 import time
@@ -26,8 +9,7 @@ import json
 from tqdm import tqdm
 import multiprocessing as mp
 
-# ⚠️ CRITICAL: Set spawn context to avoid deadlocks
-# forkserver can cause queue deadlocks with large objects
+
 try:
     mp.set_start_method('spawn', force=True)
 except RuntimeError:
@@ -44,15 +26,7 @@ except ImportError:
 
 
 class MCMCSampler:
-    """
-    MCMC sampler với HDF5 Backend - ZERO RAM GROWTH!
-    
-    Key improvements:
-    - All chain data saved directly to disk (HDF5)
-    - RAM usage constant regardless of chain length
-    - Automatic resume from crashes
-    - Can read results while running
-    """
+
     
     def __init__(self,
                  log_prob_fn: Callable,
@@ -63,28 +37,7 @@ class MCMCSampler:
                  use_parallel: bool = False,
                  n_processes: Optional[int] = None,
                  backend_filename: Optional[str] = None):
-        """
-        Initialize MCMC sampler with HDF5 Backend.
-        
-        Parameters:
-        -----------
-        log_prob_fn : callable
-            Log-probability function
-        n_params : int
-            Number of parameters
-        n_walkers : int
-            Number of MCMC walkers
-        param_names : list, optional
-            Parameter names
-        checkpoint_dir : str
-            Directory for HDF5 backend file
-        use_parallel : bool
-            Enable parallel execution
-        n_processes : int, optional
-            Number of parallel processes
-        backend_filename : str, optional
-            HDF5 backend filename (default: mcmc_chain.h5)
-        """
+
         self.log_prob_fn = log_prob_fn
         self.n_params = n_params
         self.n_walkers = n_walkers
@@ -123,15 +76,7 @@ class MCMCSampler:
             print(f"[INFO] HDF5 Backend: {self.backend_path}")
     
     def _init_backend(self, reset: bool = False):
-        """
-        Initialize HDF5 backend.
-        
-        Parameters:
-        -----------
-        reset : bool
-            If True, reset backend (start fresh)
-            If False, resume from existing file
-        """
+ 
         if reset and self.backend_path.exists():
             # Delete old file to ensure clean start
             self.backend_path.unlink()
@@ -153,19 +98,7 @@ class MCMCSampler:
                 self.logger.info(f"   Will resume from step {saved_steps + 1}")
     
     def _init_sampler(self):
-        """Initialize emcee sampler with HDF5 backend.
-
-        Move strategy: DEMove + DESnookerMove mix.
-        Rationale: StretchMove (emcee default) degrades badly when parameters
-        are correlated or the posterior is elongated — which is exactly the
-        case for (log_mdisk, r_c, dust_to_gas).  Differential Evolution moves
-        learn the covariance structure directly from the ensemble itself and
-        are far more efficient for degenerate/correlated posteriors
-        (ter Braak & Vrugt 2008; Hou+2012 ApJ).
-
-        Weights: 80% DEMove (global covariance steps) + 20% DESnookerMove
-        (projection steps that help escape ridges and curved degeneracies).
-        """
+    
         moves = [
             (emcee.moves.DEMove(),        0.8),
             (emcee.moves.DESnookerMove(), 0.2),
@@ -202,33 +135,7 @@ class MCMCSampler:
             n_steps: int,
             resume: bool = False,
             show_progress: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Run MCMC sampling with HDF5 Backend.
-        
-        Parameters:
-        -----------
-        initial_positions : ndarray
-            Initial positions for walkers (n_walkers, n_params)
-        n_steps : int
-            Number of steps to run
-        resume : bool
-            If True, resume from existing backend file
-            If False, start fresh (reset backend)
-        show_progress : bool
-            Show progress bar
-        
-        Returns:
-        --------
-        chain : ndarray
-            MCMC chain (n_walkers, n_saved_steps, n_params)
-        log_prob : ndarray
-            Log-probabilities (n_walkers, n_saved_steps)
-        
-        Notes:
-        ------
-        Chain data is automatically saved to HDF5 file.
-        RAM usage stays constant!
-        """
+    
         if self.logger:
             self.logger.info("="*80)
             self.logger.info(f"STARTING MCMC RUN")
@@ -375,46 +282,13 @@ class MCMCSampler:
         return self.get_chain(), self.get_log_prob()
     
     def get_chain(self, discard: int = 0, thin: int = 1, flat: bool = False) -> np.ndarray:
-        """
-        Get MCMC chain from HDF5 backend.
-        
-        Parameters:
-        -----------
-        discard : int
-            Number of burn-in steps to discard
-        thin : int
-            Thinning factor
-        flat : bool
-            Return flattened chain (n_samples, n_params)
-        
-        Returns:
-        --------
-        chain : ndarray
-            MCMC chain
-        """
+
         if self.backend is None:
             raise RuntimeError("Backend not initialized. Run MCMC first or load existing backend.")
         
         return self.backend.get_chain(discard=discard, thin=thin, flat=flat)
     
     def get_log_prob(self, discard: int = 0, thin: int = 1, flat: bool = False) -> np.ndarray:
-        """
-        Get log-probabilities from HDF5 backend.
-        
-        Parameters:
-        -----------
-        discard : int
-            Number of burn-in steps to discard
-        thin : int
-            Thinning factor
-        flat : bool
-            Return flattened array
-        
-        Returns:
-        --------
-        log_prob : ndarray
-            Log-probabilities
-        """
         if self.backend is None:
             raise RuntimeError("Backend not initialized. Run MCMC first or load existing backend.")
         
@@ -424,39 +298,14 @@ class MCMCSampler:
                    discard: int = 0, 
                    thin: int = 1,
                    flat: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Get MCMC samples (convenience wrapper).
-        
-        Parameters:
-        -----------
-        discard : int
-            Number of burn-in steps to discard
-        thin : int
-            Thinning factor
-        flat : bool
-            Return flattened arrays
-        
-        Returns:
-        --------
-        samples : ndarray
-            MCMC samples
-        log_prob_samples : ndarray
-            Corresponding log-probabilities
-        """
+
         chain = self.get_chain(discard=discard, thin=thin, flat=flat)
         log_prob = self.get_log_prob(discard=discard, thin=thin, flat=flat)
         
         return chain, log_prob
     
     def load_backend(self, backend_path: Optional[str] = None):
-        """
-        Load existing HDF5 backend.
-        
-        Parameters:
-        -----------
-        backend_path : str, optional
-            Path to backend file. If None, use default.
-        """
+
         if backend_path is not None:
             self.backend_path = Path(backend_path)
         
@@ -472,14 +321,7 @@ class MCMCSampler:
             self.logger.info(f"  • Params: {self.backend.shape[1]}")
     
     def get_backend_info(self) -> Dict:
-        """
-        Get information about current backend.
-        
-        Returns:
-        --------
-        info : dict
-            Backend information
-        """
+
         if self.backend is None:
             return {"status": "not_initialized"}
         
@@ -534,16 +376,7 @@ class MCMCSampler:
                 self.logger.debug(f"Diagnostics logging failed: {e}")
     
     def save_metadata(self, filename: Optional[str] = None, **kwargs):
-        """
-        Save MCMC metadata to JSON.
-        
-        Parameters:
-        -----------
-        filename : str, optional
-            Output filename. Default: mcmc_metadata.json
-        **kwargs : dict
-            Additional metadata to save
-        """
+       
         if filename is None:
             filename = self.checkpoint_dir / "mcmc_metadata.json"
         
@@ -565,14 +398,7 @@ class MCMCSampler:
             self.logger.info(f"Metadata saved: {filename}")
     
     def compute_autocorr_time(self) -> Optional[np.ndarray]:
-        """
-        Compute autocorrelation time for each parameter.
-        
-        Returns:
-        --------
-        tau : ndarray or None
-            Autocorrelation times for each parameter
-        """
+
         if self.backend is None:
             return None
         
@@ -597,21 +423,7 @@ class MCMCSampler:
             return None
     
     def compute_gelman_rubin(self, discard: int = 0) -> Optional[np.ndarray]:
-        """
-        Compute Gelman-Rubin convergence diagnostic.
-        
-        R-hat should be < 1.1 for convergence.
-        
-        Parameters:
-        -----------
-        discard : int
-            Burn-in to discard
-        
-        Returns:
-        --------
-        r_hat : ndarray or None
-            R-hat statistic for each parameter
-        """
+
         if self.backend is None:
             return None
         
@@ -686,31 +498,7 @@ def load_chain_from_backend(backend_path: str,
                            discard: int = 0, 
                            thin: int = 1, 
                            flat: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Load chain from HDF5 backend file.
-    
-    Parameters:
-    -----------
-    backend_path : str
-        Path to HDF5 backend file
-    discard : int
-        Burn-in steps to discard
-    thin : int
-        Thinning factor
-    flat : bool
-        Return flattened arrays
-    
-    Returns:
-    --------
-    chain : ndarray
-        MCMC chain
-    log_prob : ndarray
-        Log-probabilities
-    
-    Example:
-    --------
-    >>> chain, log_prob = load_chain_from_backend("checkpoints/mcmc_chain.h5", discard=100)
-    """
+  
     backend = emcee.backends.HDFBackend(backend_path, read_only=True)
     
     chain = backend.get_chain(discard=discard, thin=thin, flat=flat)
@@ -720,19 +508,7 @@ def load_chain_from_backend(backend_path: str,
 
 
 def get_backend_info(backend_path: str) -> Dict:
-    """
-    Get information about HDF5 backend without loading data.
-    
-    Parameters:
-    -----------
-    backend_path : str
-        Path to HDF5 backend file
-    
-    Returns:
-    --------
-    info : dict
-        Backend information
-    """
+
     backend = emcee.backends.HDFBackend(backend_path, read_only=True)
     
     return {
