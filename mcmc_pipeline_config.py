@@ -122,11 +122,11 @@ INCLINATION_DEG = 47.0
 # ⚠️  CRITICAL: POSITION ANGLE COORDINATE TRANSFORMATION
 # ═══════════════════════════════════════════════════════════════════════════
 
-PA_OBS_DEG = 121.5  
+PA_OBS_DEG = 129.6  # 2D Gaussian calibrated value
 
 # RADMC-3D posang parameter:
 
-POSITION_ANGLE_DEG = PA_OBS_DEG - 90.0        # = PA_OBS_DEG - 90°
+POSITION_ANGLE_DEG = 39.6        # = PA_OBS_DEG - 90° = 129.6 - 90.0
 
 
 IMAGE_SIZE_AU = 94.0  # MUST match observation FOV for direct pixel comparison
