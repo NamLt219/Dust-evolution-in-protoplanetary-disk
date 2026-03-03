@@ -9,9 +9,9 @@
 ### 1. **`mcmc_pipeline_config.py`** - Cấu hình trung tâm
 ```python
 # Chứa TẤT CẢ config:
-MCMC_PARAMETERS = [...]  # 5 free parameters
-FIXED_PARAMETERS = {...}  # r_in, alpha
-BEAM_SIZE_AU = (6.9, 5.1)
+MCMC_PARAMETERS = [...]  
+FIXED_PARAMETERS = {...}  
+BEAM_SIZE_AU = ( , )
 OBSERVED_FLUX = ...
 ```
 **Vai trò:** Single source of truth cho toàn bộ pipeline
