@@ -165,8 +165,12 @@ class ForwardModelSimulatorV2:
         self.__dict__.update(state)
         # No need to recreate logger - it's now a @property
     
-    def simulate(self, params: Dict[str, float], keep_dir: bool = False) -> Tuple[bool, Optional[np.ndarray], Optional[Dict], Optional[Path]]:
-      
+    def simulate(self, params: Dict[str, float]) -> Tuple[bool, Optional[np.ndarray], Optional[Dict]]:
+        """Run complete forward model simulation.
+        
+        Returns:
+            Tuple of (success: bool, image: Optional[np.ndarray], metadata: Optional[Dict])
+        """
         self._log_info(f"Starting simulation with params: {params}")
         
         # RAM Guardian: Wait if system memory is critically low
@@ -217,13 +221,15 @@ class ForwardModelSimulatorV2:
             if peak_flux < RMS_NOISE_JY:
                 self._log_warning(f"⚠️  SAFETY: Peak flux {peak_flux:.2e} Jy/beam < RMS noise {RMS_NOISE_JY:.2e}")
             
-            # Check integrated flux ratio (warn if way off from observed)
+            # Compute integrated flux ONCE (DRY principle - reused in safety trap & metadata)
             pixel_scale_as = (IMAGE_SIZE_AU / IMAGE_NPIX) / DISTANCE_PC
             pix_sr = (pixel_scale_as * np.pi / (180.0 * 3600.0))**2
             beam_sr = (np.pi / (4.0 * np.log(2.0))) * \
                       (BEAM_MAJOR_ARCSEC * np.pi / (180.0 * 3600.0)) * \
                       (BEAM_MINOR_ARCSEC * np.pi / (180.0 * 3600.0))
-            model_flux_mjy = np.sum(image) * pix_sr / beam_sr * 1000.0
+            model_flux_mjy = float(np.sum(image) * pix_sr / beam_sr * 1000.0)
+            
+            # Check integrated flux ratio (warn if way off from observed)
             obs_flux = getattr(config, 'OBSERVED_FLUX_1P3MM_MJY', 70.8)
             if obs_flux > 0 and (model_flux_mjy / obs_flux > 100 or model_flux_mjy / obs_flux < 0.01):
                 self._log_warning(f"⚠️  FLUX TRAP: Model flux {model_flux_mjy:.2f} mJy is >100× or <0.01× observed {obs_flux:.1f} mJy")
@@ -236,11 +242,7 @@ class ForwardModelSimulatorV2:
                 'image_shape': image.shape,
                 'dustpy_dir': str(sim_dir),
                 'sim_dir': str(sim_dir), 
-                'integrated_flux_mjy': float(np.sum(image) * 
-                    ((IMAGE_SIZE_AU / IMAGE_NPIX / DISTANCE_PC * np.pi / (180.0 * 3600.0))**2) /
-                    ((np.pi / (4.0 * np.log(2.0))) * 
-                     (BEAM_MAJOR_ARCSEC * np.pi / (180.0 * 3600.0)) * 
-                     (BEAM_MINOR_ARCSEC * np.pi / (180.0 * 3600.0)))) * 1000.0,
+                'integrated_flux_mjy': model_flux_mjy,  # Reuse pre-computed value
                 'success': True
             }
             
@@ -266,13 +268,15 @@ class ForwardModelSimulatorV2:
     def _run_dustpy(self, sim_dir: Path, params: Dict[str, float]) -> Tuple[bool, Optional[Dict]]:
   
         try:
-            # Extract parameters (with defaults)
-            log_mdisk = params.get('log_mdisk', -2.0)  # TOTAL/GAS mass (see docstring NOTE)
-            r_c = params.get('r_c', 60.0)
-            vFrag = params.get('vFrag', 200.0)
-            sigma_exp = params.get('sigma_exp', 1.0)
-            dust_to_gas = params.get('dust_to_gas', 0.01)
-            r_in = params.get('r_in', 3.0)  # Inner cavity radius [AU] — free MCMC parameter
+            # Extract all 6 free parameters directly from the walker's param dict.
+            # Geometry (incl, PA, shift) is hard-locked in likelihood.
+            # r_in is NOW A FREE PARAMETER (unlocked from fixed 5.0 AU)
+            log_mdisk   = params.get('log_mdisk',    -2.0)
+            r_c         = params.get('r_c',           60.0)
+            vFrag       = params.get('vFrag',        200.0)   # cm/s
+            sigma_exp   = params.get('sigma_exp',      1.0)
+            dust_to_gas = params.get('dust_to_gas',   0.01)
+            r_in        = params.get('r_in',          1.855)  # AU — NOW A FREE PARAMETER
             
          
             M_gas = 10**log_mdisk * c.M_sun  # Gas mass (primary)
@@ -511,8 +515,9 @@ class ForwardModelSimulatorV2:
         
         # Radial grid
         nr = 100
-        mcmc_rin_au = params.get('r_in', 1.0)
-        rin_au = max(0.1, mcmc_rin_au * 0.5)
+        # Extract r_in from params (NOW A FREE PARAMETER - no longer hard-coded)
+        mcmc_rin_au = params.get('r_in', 1.855)  # AU - from MCMC walker
+        rin_au = max(0.1, mcmc_rin_au * 0.5)  # RADMC-3D grid starts at 0.5× r_in
         rin = rin_au * au
         self._log_debug(f"Dynamic RADMC-3D grid rin set to {rin_au:.3f} AU (MCMC r_in = {mcmc_rin_au:.3f} AU)")
         
@@ -704,7 +709,16 @@ class ForwardModelSimulatorV2:
         hp = H_interp(r_au_grid)
         hpr = hp / rc
 
-        PSI_MIN = 1.3  # Minimum flaring index
+        # FLARING INDEX ψ = 1.3  — MATHEMATICAL DERIVATION:
+        # Class 0 disk models give aspect ratio  h/r ∝ r^β  with β ≈ 0.3
+        #   i.e.  h/r = (h/r)₀ × (r/r₀)^0.3
+        # Scale height:  H(r) = r × (h/r) ∝ r^1 × r^0.3 = r^1.3
+        # Flaring index ψ is defined as  H ∝ r^ψ  ⇒  ψ = 1.3
+        # Note: ψ = 1.3, NOT 0.3 (common confusion: 0.3 is the h/r exponent;
+        #       the H exponent = 1 + 0.3 = 1.3 because H = r × (h/r)).
+        # This value matches config.FLARING_INDEX and is enforced as a floor
+        # to prevent artificially flat disks from the DustPy thermal solution.
+        PSI_MIN = 1.3  # Minimum flaring index (ψ = 1 + β, β = 0.3)
         
         # Measure current flaring index from DustPy output
         # Use log-log fit: log(H/r) = (ψ-1)*log(r) + const
@@ -1059,24 +1073,26 @@ class ForwardModelSimulatorV2:
                 image_data = np.array(image_data)
                 image_data = image_data.reshape((ny, nx))
             
-           
+            # Unit conversion: CGS (erg/s/cm²/Hz/sr) → Jy/sr → Jy/pixel
             pixel_scale_as = (IMAGE_SIZE_AU / IMAGE_NPIX) / DISTANCE_PC  # arcsec/pixel
             pixel_scale_rad = pixel_scale_as * (np.pi / 648000.0)         # rad/pixel
             pixel_sr = pixel_scale_rad ** 2                                # sr/pixel
-            image_data_jy_per_pix = image_data * pixel_sr / 1.0e-23       # Jy/pixel
+            image_data_jy_per_pix = image_data * 1e23 * pixel_sr          # erg/s/cm²/Hz/sr → Jy/pixel
 
             beam_sigma_x = (BEAM_MAJOR_ARCSEC / 2.355) / pixel_scale_as  # pixels
             beam_sigma_y = (BEAM_MINOR_ARCSEC / 2.355) / pixel_scale_as  # pixels
+            theta_rad = np.deg2rad(BEAM_PA_DEG)  # Beam position angle rotation (22°)
             
-            kernel = Gaussian2DKernel(x_stddev=beam_sigma_x, y_stddev=beam_sigma_y, x_size=31, y_size=31)
+            kernel = Gaussian2DKernel(x_stddev=beam_sigma_x, y_stddev=beam_sigma_y, 
+                                     theta=theta_rad, x_size=31, y_size=31)
             convolved_jy_per_pix = convolve(image_data_jy_per_pix, kernel, boundary='extend')
 
             # Convert Jy/pixel → Jy/beam
-            # beam_area_sr = (π/4ln2) × BMAJ_rad × BMIN_rad
+            # Jy/beam = Jy/pixel × (beam_area / pixel_area)
             bmaj_rad = BEAM_MAJOR_ARCSEC * (np.pi / 648000.0)
             bmin_rad = BEAM_MINOR_ARCSEC * (np.pi / 648000.0)
             beam_sr = (np.pi / (4.0 * np.log(2.0))) * bmaj_rad * bmin_rad
-            convolved = convolved_jy_per_pix * pixel_sr / beam_sr  # Jy/beam
+            convolved = convolved_jy_per_pix * (beam_sr / pixel_sr)  # Corrected: multiply by ppb
             
             # Rotation already done by posang parameter in radmc3d command
             # No post-processing rotation needed
@@ -1087,13 +1103,6 @@ class ForwardModelSimulatorV2:
         except Exception as e:
             self._log_error(f"Fallback RADMC3D failed: {e}", exception=e)
             return None
-
-
-# ===== BACKWARDS COMPATIBILITY =====
-# Keep old class name as alias for seamless replacement in MCMC code
-ForwardModelSimulator = ForwardModelSimulatorV2
-
-
 
 
 
