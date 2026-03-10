@@ -11,27 +11,28 @@ except ImportError:
     RAM_GUARDIAN_AVAILABLE = False
 
 try:
-    from mcmc_pipeline_config import *
+    import mcmc_pipeline_config as config
     from mcmc_logger import get_logger
 except ImportError:
     # Fallback configs for testing
-    IMAGE_NPIX = 201
-    RMS_NOISE_JY = 2.3e-05
+    class config:
+        IMAGE_NPIX = 201
+        RMS_NOISE_JY = 2.3e-05
 
 class LikelihoodCalculator:
 
     def __init__(self, 
                  obs_image: np.ndarray, 
-                 rms_noise: float = RMS_NOISE_JY,
+                 rms_noise: float = None,
                  roi_radius_pixels: int = None,
                  beam_major_arcsec: float = None,
                  beam_minor_arcsec: float = None,
                  pixel_scale_arcsec: float = None,
                  align_centers: bool = True):
 
-        
         self.obs_image = obs_image
-        self.rms_noise = rms_noise
+        # Use config default if rms_noise not provided
+        self.rms_noise = rms_noise if rms_noise is not None else config.RMS_NOISE_JY
         
 
         if beam_major_arcsec and beam_minor_arcsec and pixel_scale_arcsec:
@@ -61,29 +62,26 @@ class LikelihoodCalculator:
         self.inv_sigma2 = 1.0 / (self.effective_rms ** 2)
         
 
+        # 2D GAUSSIAN PEAK ALIGNMENT (matches reference paper phase center)
+        # The reference paper positioned their R=0 by running CASA imfit on the
+        # brightest continuum source (2D Gaussian peak), NOT center-of-mass.
+        # We load the same offset here so every model evaluation is registered
+        # to that exact same phase center before the χ² is computed.
+        try:
+            self._dx_shift = float(config.DX_SHIFT)
+            self._dy_shift = float(config.DY_SHIFT)
+            print(f"INFO: 2D Gaussian peak alignment shift loaded from config:")
+            print(f"  DX_SHIFT = {self._dx_shift:+.6f} px  (col, +ve = right)")
+            print(f"  DY_SHIFT = {self._dy_shift:+.6f} px  (row, +ve = up)")
+            print(f"  Method   : 2D Gaussian peak (matches CASA imfit reference frame)")
+        except (ImportError, AttributeError):
+            self._dx_shift = 0.0
+            self._dy_shift = 0.0
+            print("WARNING: DX_SHIFT/DY_SHIFT not found in config — shift set to zero.")
+
+        # Legacy attribute kept for API compatibility (no longer used for centering)
         self.align_centers = align_centers
-        if align_centers:
-  
-            nonzero_vals = obs_image[obs_image > 0]
-            if len(nonzero_vals) == 0:
-                self.obs_peak = None
-                print("WARNING: Observation image is all zeros — centering disabled.")
-            else:
-                threshold = np.percentile(nonzero_vals, 90)  # top 10% of actual signal
-                bright_mask = obs_image >= threshold
-                total_flux = obs_image[bright_mask].sum()
-                ny_o, nx_o = obs_image.shape
-                yy, xx = np.indices((ny_o, nx_o))
-                cen_y = (obs_image * bright_mask * yy).sum() / total_flux
-                cen_x = (obs_image * bright_mask * xx).sum() / total_flux
-                self.obs_peak = (cen_y, cen_x)
-                argmax_yx = np.unravel_index(np.argmax(obs_image), obs_image.shape)
-                print(f"INFO: Centering correction enabled (flux-weighted centroid, non-zero pixels only).")
-                print(f"  centroid  : ({cen_x:.2f}, {cen_y:.2f}) [x, y]")
-                print(f"  argmax    : ({argmax_yx[1]}, {argmax_yx[0]}) [x, y]")
-                print(f"  image ctr : ({nx_o//2}, {ny_o//2}) [x, y]")
-        else:
-            self.obs_peak = None
+        self.obs_peak = None
         
 
         ny, nx = obs_image.shape
@@ -98,10 +96,20 @@ class LikelihoodCalculator:
             self.mask = r_sq <= (roi_radius_pixels**2)
             print(f"INFO: Likelihood using Circular ROI mask (R={roi_radius_pixels} pix)")
         else:
-            # Mặc định: Lấy toàn bộ ảnh (An toàn nhất để tránh bias)
-            self.mask = np.ones_like(obs_image, dtype=bool)
-            print("INFO: Likelihood using FULL IMAGE (No masking) - Safest option")
-                
+            # 3σ SIGNAL MASK — only fit pixels where the observed emission
+            # is detected at ≥ 3σ significance.  This excludes noise-dominated
+            # pixels from the χ², which would otherwise dominate the sum and
+            # dilute the model sensitivity to the real disk structure.
+            # Threshold uses the *bare* thermal RMS (not beam-corrected), because
+            # the observation FITS pixel values are still in Jy/beam units.
+            three_sigma_threshold = 3.0 * rms_noise
+            self.mask = obs_image >= three_sigma_threshold
+            n_signal = int(np.sum(self.mask))
+            print(f"INFO: Likelihood using 3\u03c3 SIGNAL MASK:")
+            print(f"  Threshold          : {three_sigma_threshold:.2e} Jy/beam  (3 \u00d7 {rms_noise:.2e})")
+            print(f"  Signal pixels      : {n_signal}  /  {obs_image.size}  total")
+            print(f"  Coverage           : {100.0*n_signal/obs_image.size:.1f} %")
+
         # Thống kê sơ bộ
         self.n_pixels = np.sum(self.mask)
         print(f"INFO: Likelihood initialized. Noise RMS={rms_noise:.2e}. Pixels used={self.n_pixels}")
@@ -121,27 +129,18 @@ class LikelihoodCalculator:
             # Silent return (logging in multiprocessing causes pickling issues)
             return -np.inf
         
-        # 2.5. CENTERING CORRECTION
-        # Align model centroid to observation centroid using sub-pixel shift.
-        # Uses flux-weighted centroid (top 10% pixels) — stable against noise spikes.
-        if self.align_centers and self.obs_peak is not None:
-            nonzero_mod = model_image[model_image > 0]
-            if len(nonzero_mod) == 0:
-                return -np.inf  # degenerate model (all zeros)
-            threshold = np.percentile(nonzero_mod, 90)  # top 10% of actual signal
-            bright_mask = model_image >= threshold
-            total_flux = model_image[bright_mask].sum()
-            if total_flux > 0:
-                ny_m, nx_m = model_image.shape
-                yy, xx = np.indices((ny_m, nx_m))
-                mod_cen_y = (model_image * bright_mask * yy).sum() / total_flux
-                mod_cen_x = (model_image * bright_mask * xx).sum() / total_flux
-                dy = self.obs_peak[0] - mod_cen_y
-                dx = self.obs_peak[1] - mod_cen_x
-                # Only shift if offset > 0.3 pixel (sub-pixel precision)
-                if abs(dy) > 0.3 or abs(dx) > 0.3:
-                    model_image = ndimage_shift(model_image, shift=(dy, dx),
-                                               order=1, mode='constant', cval=0.0)
+        # 2.5. 2D GAUSSIAN PEAK ALIGNMENT — applied unconditionally before χ²
+        # Translates the model to the same phase center used in the reference
+        # paper (CASA imfit 2D Gaussian peak).  Uses order-3 spline interpolation
+        # to preserve flux while avoiding ringing artefacts.
+        # shift=[row_shift, col_shift] = [DY_SHIFT, DX_SHIFT]
+        model_image = ndimage_shift(
+            model_image,
+            shift=[self._dy_shift, self._dx_shift],
+            order=3,
+            mode='constant',
+            cval=0.0
+        )
 
         # 3. Tính Residual (Dư lượng)
         # Residual = Model - Data (hoặc Data - Model, bình phương lên như nhau)
