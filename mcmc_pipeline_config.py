@@ -116,7 +116,7 @@ for d in [WORK_DIR, MCMC_OUTPUT_DIR, CHECKPOINT_DIR, LOG_DIR]:
 
 
 DISTANCE_PC = 156.0  
-INCLINATION_DEG = 47.0 
+INCLINATION_DEG = 40.2  # HARD-LOCKED: morphological comparison confirmed 40.2° wins
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚠️  CRITICAL: POSITION ANGLE COORDINATE TRANSFORMATION
@@ -127,6 +127,33 @@ PA_OBS_DEG = 129.6  # 2D Gaussian calibrated value
 # RADMC-3D posang parameter:
 
 POSITION_ANGLE_DEG = 39.6        # = PA_OBS_DEG - 90° = 129.6 - 90.0
+
+# ALIGNMENT JUSTIFICATION: Shift values align the model's star to the 2D Gaussian peak
+# of the ALMA continuum emission.  We strictly use the Gaussian peak (NOT Center of Mass)
+# because the reference paper defined their R=0 phase center by applying CASA's imfit to
+# the brightest continuum source ("shifted the brightest source in the image to common
+# phase center").  Using the Gaussian peak ensures our kinematics and radial profiles
+# share the exact same reference frame as the paper.
+# Values derived from the incl=40.2° diagnostic run (2D Gaussian fit to residual map).
+DX_SHIFT = -2.3176  # pixels  (col shift: positive = right) — 2D Gaussian peak offset
+DY_SHIFT =  1.9497  # pixels  (row shift: positive = up)   — 2D Gaussian peak offset
+
+# Inner radius fixed at the ALMA resolution limit — cannot be resolved
+# ALMA beam at d=156 pc: θ_beam ≈ 43 mas → 6.7 AU (half-beam ≈ 3.4 AU)
+# We adopt R_in = 5 AU as a conservative sub-beam floor: any cavity
+# smaller than this is unresolvable and must not be a free parameter.
+R_IN_FIXED_AU = 5.0   # AU (fixed; ALMA half-beam ~3.4 AU at 156 pc)
+
+# FLARING INDEX  ψ = 1.3  — MATHEMATICAL DERIVATION:
+# Observations/models of Class 0 disks find aspect ratio h/r ∝ r^β  with β ≈ 0.3
+#   i.e.  h/r  =  (h/r)₀ × (r/r₀)^0.3
+# The scale height is  H(r) = r × (h/r) ∝ r^1 × r^0.3 = r^1.3
+# The flaring index ψ is defined by  H ∝ r^ψ
+#   ⇒  ψ = d ln H / d ln r = 1.3
+# Note: ψ = 1.3, NOT 0.3 — common confusion between the h/r exponent (0.3)
+#       and the H(r) power-law exponent (1.3 = 1 + 0.3).
+# RADMC-3D / DustPy both use ψ in the sense  H ∝ r^ψ, so ψ = 1.3 is correct.
+FLARING_INDEX = 1.3   # ψ = 1 + 0.3 (from h/r ∝ r^0.3)
 
 
 IMAGE_SIZE_AU = 94.0  # MUST match observation FOV for direct pixel comparison
@@ -146,8 +173,8 @@ BEAM_MINOR_ARCSEC = 0.037  # Minor axis: 37 mas = 0.037 arcsec (NOT 36.6!)
 BEAM_PA_DEG = 22.0  # Beam position angle: 22° (exact from paper)
 
 
-RMS_NOISE_JY = 2.3e-05  # RMS noise level in Jy/beam (23 μJy/beam)
-
+RMS_NOISE_JY = 2.3e-05  # RMS noise level in Jy/beam (23 μJy/beam)   
+THREE_SIGMA_NOISE_JY = 3 * RMS_NOISE_JY  # 3σ noise level for masking
 
 # =============================================================================
 # DUSTPY PARAMETERS  
@@ -184,66 +211,65 @@ DISK_MINOR_AXIS_MAS = 93.7
 
 MCMC_PARAMETERS = [
     {
-        
-        "name": "log_mdisk",  
-        "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",  # ✅ CORRECTED LABEL
-        "min": -3.5,         
-        "max": -1.5,         
-        "default": -2.4,      
-        "log_scale": False,   
+        "name": "log_mdisk",
+        "label": r"$\log_{10}(M_{\rm gas}/M_{\odot})$",
+        "min": -4.0,      # Wide prior: allow very low-mass solutions
+        "max": -1.0,      # Wide prior: allow moderately massive disks
+        "default": -2.8448,  # Best-fit from 200-step chain
+        "log_scale": False,
         "unit": "M_sun",
     },
     {
         "name": "r_c",  # Characteristic radius in AU
         "label": r"$R_c$ (AU)",
-        "min": 10.0,     
-        "max": 30.0,     
-        "default": 20.0,  
-        "log_scale": False,  # Linear sampling for this narrow range
+        "min":  5.0,   # Physically motivated lower bound
+        "max": 30.0,   # Expanded upper bound — size deficit suspected
+        "default": 11.073,  # Best-fit from 200-step chain
+        "log_scale": False,
         "unit": "AU",
     },
     {
-        "name": "vFrag", 
+        "name": "vFrag",
         "label": r"$v_{\rm frag}$ (cm/s)",
-        "min": 100.0,    
-        "max": 500.0,     
-        "default": 200.0,  # Test showed this works well
-        "log_scale": False,  # Linear for narrow range
+        "min":  10.0,   # Very low fragmentation threshold
+        "max": 500.0,   # High fragmentation threshold (cm/s)
+        "default": 373.73,  # Best-fit from 200-step chain
+        "log_scale": False,
         "unit": "cm/s",
     },
-    {
-        "name": "sigma_exp",  # Surface density power-law exponent (γ)
-        "label": r"$\gamma$ (Σ exponent)",
-        "min": 0.5,       
+    {   # SIGN CONVENTION: DustPy's sigma_exp is negated relative to standard convention
+        # MCMC parameter: positive gamma => Sigma(r) = Sigma_0 * (r/r_c)^(-gamma)
+        # DustPy expects:  Sigma.exp = -gamma  (negative)
+        # Conversion applied in forward_simulator.py before calling DustPy
+        "name": "sigma_exp",
+        "label": r"$\gamma$ ($\Sigma$ exponent)",
+        "min": 0.1,
         "max": 2.5,
-        "default": 1.6,  
+        "default": 0.8409,  # Best-fit from 200-step chain
         "log_scale": False,
         "unit": "",
-
     },
-
     {
-        "name": "dust_to_gas",  # Dust-to-gas mass ratio
+        "name": "dust_to_gas",
         "label": r"$\epsilon$ (d2g ratio)",
-        "min": 0.001,   
-        "max": 0.05,      
-        "default": 0.01,  # ISM value
+        "min": 0.001,  # Very dust-poor disk
+        "max": 0.05,   # Moderately dust-rich (above ISM standard)
+        "default": 0.02491,  # Best-fit from 200-step chain
         "log_scale": False,
         "unit": "",
     },
-
-    {
-        "name": "r_in",          # Inner cavity (dust depletion) radius [AU]
+    {   
+        "name": "r_in",
         "label": r"$R_{\rm in}$ (AU)",
-        "min": 1.0,   # Minimum: ~1 AU (sub-beam but affects thermal structure)
-        "max": 10.0,  # Maximum: ~10 AU (ALMA beam at 156 pc ≈ 8 AU, stay resolvable)
-        "default": 3.0,  # Starting guess: moderate inner clearing
+        "min": 0.1,     # Below dust sublimation radius (extreme case)
+        "max": 8.0,     # Above ALMA resolution limit, allows cavity exploration
+        "default": 1.855,  # Physically motivated: ~5× sublimation radius, below resolution
         "log_scale": False,
         "unit": "AU",
     },
 ]
 
-# Số parameters
+# Number of parameters (automatically updated to 6)
 N_PARAMS = len(MCMC_PARAMETERS)
 
 # Extract bounds và default values (handle both dict and string formats)
@@ -273,13 +299,17 @@ else:
 # =============================================================================
 
 
-# Number of walkers (user requested: 7 walkers × 2 = 14 total)
-N_WALKERS = 15  # 6 params × 2 = 12 minimum; 15 gives extra diversity
+# Number of walkers (15 walkers for 6 parameters)
+# Rule of thumb: n_walkers ≥ 2 × n_params (minimum 12 for 6 params)
+N_WALKERS = 15  # 6 params → minimum 12; 15 gives good exploration diversity
 
 
-N_STEPS_BURNIN = 0      
-N_STEPS_PRODUCTION = 200 
+N_STEPS_BURNIN = 0
+N_STEPS_PRODUCTION = 100   # Initial run — expand after convergence check
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
+
+# HDF5 backend filename for this physical run
+MCMC_BACKEND_FILENAME = "final_physical_run.h5"
 
 
 THIN_BY = 1  # Keep all samples initially, can increase if autocorrelation high
@@ -399,39 +429,8 @@ COMPARISON_PLOT_FILE = os.path.join(MCMC_OUTPUT_DIR, "obs_vs_model.png")
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# UTILITY FUNCTIONS
 # =============================================================================
-
-def get_initial_positions(n_walkers=N_WALKERS, scale=0.1):
-    
-    positions = []
-    for _ in range(n_walkers):
-        pos = []
-        for param in MCMC_PARAMETERS:
-            pmin, pmax = param["min"], param["max"]
-            center = param["default"]
-            
-            # Perturbation range
-            perturb = scale * (pmax - pmin)
-            
-            # Random position around default
-            if param["log_scale"]:
-                # Log-uniform distribution
-                log_min = np.log10(max(pmin, center - perturb))
-                log_max = np.log10(min(pmax, center + perturb))
-                val = 10 ** np.random.uniform(log_min, log_max)
-            else:
-                # Uniform distribution
-                val = np.random.uniform(
-                    max(pmin, center - perturb),
-                    min(pmax, center + perturb)
-                )
-            
-            pos.append(val)
-        positions.append(pos)
-    
-    return np.array(positions)
-
 
 def params_to_dict(params_array):
     """Convert parameter array to dictionary."""
@@ -490,22 +489,3 @@ def print_config_summary():
 if __name__ == "__main__":
     # Test configuration
     print_config_summary()
-    
-    # Test initial positions
-    print("\n🎲 Testing initial positions generation...")
-    pos = get_initial_positions(n_walkers=4)
-    print(f"Generated {len(pos)} walker positions with {len(pos[0])} parameters each")
-    print(f"Example walker #1: {params_to_dict(pos[0])}")
-
-
-
-
-
-
-
-
-
-
-
-
-
