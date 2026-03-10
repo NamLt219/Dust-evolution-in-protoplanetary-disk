@@ -16,13 +16,14 @@ except RuntimeError:
     pass  # Already set
 
 try:
-    from mcmc_pipeline_config import *
+    import mcmc_pipeline_config as config
     from mcmc_logger import get_logger
 except ImportError:
     print("WARNING: Config not imported")
-    N_WALKERS = 32
-    N_STEPS_TOTAL = 1000
-    CHECKPOINT_INTERVAL = 50
+    class config:
+        N_WALKERS = 32
+        N_STEPS_TOTAL = 1000
+        CHECKPOINT_INTERVAL = 50
 
 
 class MCMCSampler:
@@ -31,7 +32,7 @@ class MCMCSampler:
     def __init__(self,
                  log_prob_fn: Callable,
                  n_params: int,
-                 n_walkers: int = N_WALKERS,
+                 n_walkers: int = None,
                  param_names: Optional[list] = None,
                  checkpoint_dir: str = "./checkpoints",
                  use_parallel: bool = False,
@@ -40,7 +41,7 @@ class MCMCSampler:
 
         self.log_prob_fn = log_prob_fn
         self.n_params = n_params
-        self.n_walkers = n_walkers
+        self.n_walkers = n_walkers if n_walkers is not None else config.N_WALKERS
         self.param_names = param_names or [f"param_{i}" for i in range(n_params)]
         
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -89,13 +90,23 @@ class MCMCSampler:
             # Start fresh
             self.backend.reset(self.n_walkers, self.n_params)
             if self.logger:
-                self.logger.info(f"✅ HDF5 Backend initialized (fresh start)")
+                self.logger.info(f"✅ HDF5 Backend initialized (FRESH START)")
+                self.logger.info(f"   File: {self.backend_path}")
+                self.logger.info(f"   Walkers: {self.n_walkers}, Parameters: {self.n_params}")
         else:
             # Resume from existing
             saved_steps = self.backend.iteration
             if self.logger:
-                self.logger.info(f"✅ HDF5 Backend loaded: {saved_steps} steps already saved")
-                self.logger.info(f"   Will resume from step {saved_steps + 1}")
+                self.logger.info(f"")
+                self.logger.info(f"═══════════════════════════════════════════════════════")
+                self.logger.info(f"🔄 DISASTER RECOVERY MODE ACTIVATED")
+                self.logger.info(f"═══════════════════════════════════════════════════════")
+                self.logger.info(f"✅ Existing HDF5 backend found with {saved_steps} steps")
+                self.logger.info(f"   File: {self.backend_path}")
+                self.logger.info(f"   📦 Resuming run from step {saved_steps + 1}")
+                self.logger.info(f"   Walkers: {self.n_walkers}, Parameters: {self.n_params}")
+                self.logger.info(f"═══════════════════════════════════════════════════════")
+                self.logger.info(f"")
     
     def _init_sampler(self):
     
@@ -224,13 +235,15 @@ class MCMCSampler:
             last_step_time = current_step_time
             
             # Track best fit (lightweight - only read last step's log_prob)
-            current_log_probs = self.backend.get_log_prob()[:, -1]  # Last step only
+            # Fixed indexing: [-1, :] = last step, all walkers (not all steps, last walker)
+            current_log_probs = self.backend.get_log_prob()[-1, :]  # Last step, all walkers
             max_log_prob = np.max(current_log_probs)
             
             if max_log_prob > self.best_log_prob:
                 best_walker = np.argmax(current_log_probs)
                 self.best_log_prob = max_log_prob
-                self.best_params = self.backend.get_chain()[:, -1, :][best_walker].copy()
+                # Correct indexing: [last_step, best_walker, all_params]
+                self.best_params = self.backend.get_chain()[-1, best_walker, :].copy()
                 self.best_iteration = self.backend.iteration
                 
                 if self.logger:
@@ -412,10 +425,8 @@ class MCMCSampler:
                     self.logger.debug(f"Too few steps ({chain.shape[0]}) for autocorrelation")
                 return None
             
-            # Transpose to (n_walkers, n_steps, n_params) for emcee
-            chain_transposed = chain.transpose(1, 0, 2)
-            
-            tau = emcee.autocorr.integrated_time(chain_transposed, quiet=True)
+            # emcee expects (n_steps, n_walkers, n_params) - no transpose needed
+            tau = emcee.autocorr.integrated_time(chain, quiet=True)
             return tau
         except Exception as e:
             if self.logger:
