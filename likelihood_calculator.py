@@ -2,6 +2,7 @@ import numpy as np
 from typing import Dict, Optional, Tuple, Any
 from scipy import stats
 from scipy.ndimage import shift as ndimage_shift
+from astropy.convolution import Gaussian2DKernel, convolve_fft
 
 # RAM Guardian for OOM protection
 try:
@@ -18,6 +19,140 @@ except ImportError:
     class config:
         IMAGE_NPIX = 201
         RMS_NOISE_JY = 2.3e-05
+
+
+def apply_gaussian_peak_shift(model_data: np.ndarray,
+                              dx_shift: float = None,
+                              dy_shift: float = None) -> np.ndarray:
+    """Apply the locked astrometric shift based on 2D Gaussian peak offsets.
+
+    IMPORTANT: This is the physical alignment operation used in the likelihood math.
+    shift order is [row_shift, col_shift] = [DY_SHIFT, DX_SHIFT].
+    """
+    dx = float(config.DX_SHIFT if dx_shift is None else dx_shift)
+    dy = float(config.DY_SHIFT if dy_shift is None else dy_shift)
+    return ndimage_shift(
+        np.asarray(model_data, dtype=float),
+        shift=[dy, dx],
+        order=3,
+        mode='constant',
+        cval=0.0
+    )
+
+
+def apply_observation_beam_convolution(model_data: np.ndarray,
+                                       beam_major_arcsec: float = None,
+                                       beam_minor_arcsec: float = None,
+                                       beam_pa_deg: float = None,
+                                       pixel_scale_arcsec: float = None) -> np.ndarray:
+    """Convolve model with ALMA beam in image plane before comparison.
+
+    Uses astropy Gaussian2DKernel and FFT convolution.
+    """
+    bmaj = float(config.BEAM_MAJOR_ARCSEC if beam_major_arcsec is None else beam_major_arcsec)
+    bmin = float(config.BEAM_MINOR_ARCSEC if beam_minor_arcsec is None else beam_minor_arcsec)
+    bpa = float(config.BEAM_PA_DEG if beam_pa_deg is None else beam_pa_deg)
+    pix = float(
+        ((config.IMAGE_SIZE_AU / config.IMAGE_NPIX) / config.DISTANCE_PC)
+        if pixel_scale_arcsec is None else pixel_scale_arcsec
+    )
+
+    if pix <= 0.0:
+        raise ValueError(f"Invalid pixel_scale_arcsec={pix}")
+
+    fwhm_to_sigma = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    sigma_x_pix = (bmaj * fwhm_to_sigma) / pix
+    sigma_y_pix = (bmin * fwhm_to_sigma) / pix
+    theta_rad = np.deg2rad(bpa)
+
+    kernel = Gaussian2DKernel(
+        x_stddev=sigma_x_pix,
+        y_stddev=sigma_y_pix,
+        theta=theta_rad,
+    )
+
+    arr = np.asarray(model_data, dtype=float)
+    return convolve_fft(
+        arr,
+        kernel,
+        boundary='fill',
+        fill_value=0.0,
+        normalize_kernel=True,
+        allow_huge=True,
+        nan_treatment='interpolate',
+        preserve_nan=True,
+    )
+
+
+def prepare_model_for_observation_comparison(model_data: np.ndarray,
+                                             dx_shift: float = None,
+                                             dy_shift: float = None,
+                                             apply_beam_convolution: bool = True) -> np.ndarray:
+    """Unified math path: shift (Gaussian-peak) then ALMA beam convolution."""
+    shifted_model = apply_gaussian_peak_shift(
+        model_data=np.asarray(model_data, dtype=float),
+        dx_shift=dx_shift,
+        dy_shift=dy_shift,
+    )
+    if not apply_beam_convolution:
+        return shifted_model
+    return apply_observation_beam_convolution(shifted_model)
+
+
+def _gaussian_core_centroid(image: np.ndarray) -> Tuple[float, float]:
+    """Estimate 2D Gaussian-like centroid from the bright core in pixel space."""
+    arr = np.asarray(image, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D array, got shape={arr.shape}")
+
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        ny, nx = arr.shape
+        return 0.5 * (nx - 1), 0.5 * (ny - 1)
+
+    work = np.where(finite, arr, 0.0)
+    work = np.clip(work, a_min=0.0, a_max=None)
+    peak = float(np.max(work))
+    if peak <= 0.0:
+        ny, nx = arr.shape
+        return 0.5 * (nx - 1), 0.5 * (ny - 1)
+
+    core_mask = work >= (0.3 * peak)
+    if not np.any(core_mask):
+        core_mask = work > 0.0
+
+    y_idx, x_idx = np.indices(work.shape)
+    weights = np.where(core_mask, work, 0.0)
+    wsum = float(np.sum(weights))
+    if wsum <= 0.0:
+        ny, nx = arr.shape
+        return 0.5 * (nx - 1), 0.5 * (ny - 1)
+
+    cx = float(np.sum(weights * x_idx) / wsum)
+    cy = float(np.sum(weights * y_idx) / wsum)
+    return cx, cy
+
+
+def get_gaussian_centroid(image: np.ndarray) -> Tuple[float, float]:
+    """Public wrapper to retrieve Gaussian-core centroid in pixel space."""
+    return _gaussian_core_centroid(image)
+
+
+def verify_centroid_alignment(obs_array: np.ndarray,
+                              shifted_model_array: np.ndarray) -> Tuple[float, float, float]:
+    """Safety-net centroid check in pixel space.
+
+    Returns
+    -------
+    dx_pix, dy_pix, distance_pix
+        Pixel offsets defined as (model - observation).
+    """
+    obs_cx, obs_cy = _gaussian_core_centroid(obs_array)
+    model_cx, model_cy = _gaussian_core_centroid(shifted_model_array)
+    dx_pix = float(model_cx - obs_cx)
+    dy_pix = float(model_cy - obs_cy)
+    distance_pix = float(np.hypot(dx_pix, dy_pix))
+    return dx_pix, dy_pix, distance_pix
 
 class LikelihoodCalculator:
 
@@ -70,14 +205,20 @@ class LikelihoodCalculator:
         try:
             self._dx_shift = float(config.DX_SHIFT)
             self._dy_shift = float(config.DY_SHIFT)
+            self._shift_reference_method = str(getattr(config, "SHIFT_REFERENCE_METHOD", "2D_GAUSSIAN_PEAK"))
             print(f"INFO: 2D Gaussian peak alignment shift loaded from config:")
             print(f"  DX_SHIFT = {self._dx_shift:+.6f} px  (col, +ve = right)")
             print(f"  DY_SHIFT = {self._dy_shift:+.6f} px  (row, +ve = up)")
-            print(f"  Method   : 2D Gaussian peak (matches CASA imfit reference frame)")
+            print(f"  Method   : {self._shift_reference_method} (matches CASA imfit reference frame)")
         except (ImportError, AttributeError):
             self._dx_shift = 0.0
             self._dy_shift = 0.0
+            self._shift_reference_method = "UNKNOWN"
             print("WARNING: DX_SHIFT/DY_SHIFT not found in config — shift set to zero.")
+
+        self._alignment_check_every = int(getattr(config, "ALIGNMENT_CHECK_EVERY", 50))
+        self._alignment_warning_emitted = False
+        self._likelihood_calls = 0
 
         # Legacy attribute kept for API compatibility (no longer used for centering)
         self.align_centers = align_centers
@@ -134,13 +275,30 @@ class LikelihoodCalculator:
         # paper (CASA imfit 2D Gaussian peak).  Uses order-3 spline interpolation
         # to preserve flux while avoiding ringing artefacts.
         # shift=[row_shift, col_shift] = [DY_SHIFT, DX_SHIFT]
-        model_image = ndimage_shift(
-            model_image,
-            shift=[self._dy_shift, self._dx_shift],
-            order=3,
-            mode='constant',
-            cval=0.0
+        model_image = prepare_model_for_observation_comparison(
+            model_data=model_image,
+            dx_shift=self._dx_shift,
+            dy_shift=self._dy_shift,
+            apply_beam_convolution=True,
         )
+
+        self._likelihood_calls += 1
+        if self._alignment_check_every > 0 and (
+            self._likelihood_calls == 1 or self._likelihood_calls % self._alignment_check_every == 0
+        ):
+            dx_pix, dy_pix, dist_pix = verify_centroid_alignment(self.obs_image, model_image)
+            if dist_pix > 0.5 and not self._alignment_warning_emitted:
+                warning_msg = (
+                    "CRITICAL WARNING: Misalignment detected in pixel space! "
+                    f"Δx={dx_pix:+.3f} px, Δy={dy_pix:+.3f} px, |Δ|={dist_pix:.3f} px "
+                    "(threshold=0.5 px)"
+                )
+                try:
+                    logger = get_logger()
+                    logger.critical(warning_msg)
+                except Exception:
+                    print(warning_msg)
+                self._alignment_warning_emitted = True
 
         # 3. Tính Residual (Dư lượng)
         # Residual = Model - Data (hoặc Data - Model, bình phương lên như nhau)
@@ -233,8 +391,13 @@ class MCMCProbability:
             
 
         success, model_image, metadata = self.simulator.simulate(param_dict)
-        
+
         if not success or model_image is None:
+            try:
+                logger = get_logger()
+                logger.debug("Walker penalized with -inf due to simulation failure/timeout.")
+            except Exception:
+                pass
             return -np.inf
             
         # 3. Tính Likelihood
