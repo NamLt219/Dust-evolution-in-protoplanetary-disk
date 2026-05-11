@@ -2,7 +2,6 @@
 import os
 import sys
 import numpy as np
-from pathlib import Path
 import shutil
 
 # =============================================================================
@@ -10,10 +9,13 @@ import shutil
 # =============================================================================
 # Uses environment variables with fallbacks for server/cluster deployment
 
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+
 # Base directory: Try env var, then fall back to script location
 BASE_DIR = os.getenv(
     'MCMC_PIPELINE_BASE',
-    str(Path(__file__).parent.absolute())
+    SCRIPT_DIR
 )
 
 # Work directory: Try env var, then relative to base
@@ -40,8 +42,9 @@ def _find_obs_fits():
     
     # Search in standard locations
     search_paths = [
-        os.path.join(BASE_DIR, "IRAS04166_robust_0.0.fits"),  # In MCMC directory
-        os.path.join(os.path.dirname(BASE_DIR), "IRAS04166_robust_0.0.fits"),  # Parent directory
+        os.path.join(SCRIPT_DIR, "IRAS04166_robust_0.0.fits"),  # Workspace script directory
+        os.path.join(PARENT_DIR, "IRAS04166_robust_0.0.fits"),  # Parent directory
+        os.path.join(BASE_DIR, "IRAS04166_robust_0.0.fits"),    # Custom base (if overridden)
     ]
     
     for path in search_paths:
@@ -61,20 +64,15 @@ def _find_radmc3d():
     """Search for radmc3d executable in common locations."""
     search_paths = [
         os.getenv('RADMC3D_EXECUTABLE'),  # User-specified env var
+        os.path.join(SCRIPT_DIR, 'bin', 'radmc3d'),
+        os.path.join(PARENT_DIR, 'bin', 'radmc3d'),
         os.path.join(os.path.expanduser('~'), 'bin', 'radmc3d'),  # ~/bin
-        '/usr/local/bin/radmc3d',  # System install
-        '/opt/bin/radmc3d',  # Alternative location
         'radmc3d',  # In PATH
     ]
     
     for path in search_paths:
         if path and shutil.which(path):
             return path
-    
-    # Fallback for backward compatibility
-    legacy_path = "/home/nam/bin/radmc3d"
-    if os.path.exists(legacy_path):
-        return legacy_path
     
     raise FileNotFoundError(
         "radmc3d executable not found. Install RADMC-3D or set RADMC3D_EXECUTABLE environment variable."
@@ -87,8 +85,9 @@ RADMC3D_EXECUTABLE = _find_radmc3d()
 def _find_opacity_file():
     """Search for opacity file in standard locations."""
     search_paths = [
-        os.path.join(BASE_DIR, "dustkappa_silicate.inp"),  # In MCMC directory
-        os.path.join(os.path.dirname(BASE_DIR), "dustkappa_silicate.inp"),  # Parent directory
+        os.path.join(SCRIPT_DIR, "dustkappa_silicate.inp"),  # Workspace script directory
+        os.path.join(PARENT_DIR, "dustkappa_silicate.inp"),  # Parent directory
+        os.path.join(BASE_DIR, "dustkappa_silicate.inp"),    # Custom base (if overridden)
     ]
     
     for path in search_paths:
@@ -129,20 +128,21 @@ PA_OBS_DEG = 129.6  # 2D Gaussian calibrated value
 POSITION_ANGLE_DEG = 39.6        # = PA_OBS_DEG - 90° = 129.6 - 90.0
 
 # ALIGNMENT JUSTIFICATION: Shift values align the model's star to the 2D Gaussian peak
-# of the ALMA continuum emission.  We strictly use the Gaussian peak (NOT Center of Mass)
-# because the reference paper defined their R=0 phase center by applying CASA's imfit to
-# the brightest continuum source ("shifted the brightest source in the image to common
-# phase center").  Using the Gaussian peak ensures our kinematics and radial profiles
-# share the exact same reference frame as the paper.
-# Values derived from the incl=40.2° diagnostic run (2D Gaussian fit to residual map).
-DX_SHIFT = -2.3176  # pixels  (col shift: positive = right) — 2D Gaussian peak offset
-DY_SHIFT =  1.9497  # pixels  (row shift: positive = up)   — 2D Gaussian peak offset
+# of the ALMA continuum emission. We strictly use the 2D Gaussian centroid from imfit,
+# NEVER np.argmax() / max-pixel intensity peak, and NEVER center-of-mass.
+# This preserves the physical/kinematic disk center and avoids bias from asymmetric dust traps.
+# Values re-calibrated against real-data centroid validation
+# (IRAS04166_robust_0.0.fits vs fresh mcmc_results/best_model_image.fits)
+# using the production pipeline: shift -> beam convolution -> pixel-space Gaussian centroid check.
+SHIFT_REFERENCE_METHOD = "2D_GAUSSIAN_PEAK"  # Locked: not intensity max-pixel (np.argmax)
+DX_SHIFT = -1.7838  # pixels (x/column). Locked 2D Gaussian-peak offset
+DY_SHIFT =  1.7794  # pixels (y/row).    Locked 2D Gaussian-peak offset
 
 # Inner radius fixed at the ALMA resolution limit — cannot be resolved
 # ALMA beam at d=156 pc: θ_beam ≈ 43 mas → 6.7 AU (half-beam ≈ 3.4 AU)
 # We adopt R_in = 5 AU as a conservative sub-beam floor: any cavity
 # smaller than this is unresolvable and must not be a free parameter.
-R_IN_FIXED_AU = 5.0   # AU (fixed; ALMA half-beam ~3.4 AU at 156 pc)
+
 
 # FLARING INDEX  ψ = 1.3  — MATHEMATICAL DERIVATION:
 # Observations/models of Class 0 disks find aspect ratio h/r ∝ r^β  with β ≈ 0.3
@@ -304,8 +304,8 @@ else:
 N_WALKERS = 15  # 6 params → minimum 12; 15 gives good exploration diversity
 
 
-N_STEPS_BURNIN = 0
-N_STEPS_PRODUCTION = 100   # Initial run — expand after convergence check
+N_STEPS_BURNIN = 30
+N_STEPS_PRODUCTION = 200   # Initial run — expand after convergence check
 N_STEPS_TOTAL = N_STEPS_BURNIN + N_STEPS_PRODUCTION
 
 # HDF5 backend filename for this physical run
@@ -333,7 +333,7 @@ CHECKPOINT_INTERVAL = 5
 # Convergence criteria
 MIN_AUTOCORR_TIMES = 50  # Minimum number of autocorrelation times
 MAX_AUTOCORR_CHANGE = 0.01  # Maximum change in autocorrelation time for convergence
-
+ 
 
 # =============================================================================
 # LIKELIHOOD SETTINGS
@@ -381,8 +381,8 @@ OPACITY_POWERLAW_INDEX = 1.0  # Beta for opacity ~ lambda^-beta
 SCATTERING_MODE = 1  # 0=no scattering, 1=isotropic, 2=HG, 3=full
 
 # Number of photons for Monte Carlo
-N_PHOTONS_SCAT = 100000  # For scattering Monte Carlo
-N_PHOTONS_THERM = 100000  # For thermal Monte Carlo
+N_PHOTONS_SCAT = 500000  # For scattering Monte Carlo
+N_PHOTONS_THERM = 500000  # For thermal Monte Carlo
 
 # Image rendering
 RENDER_NPIX = NPIX
