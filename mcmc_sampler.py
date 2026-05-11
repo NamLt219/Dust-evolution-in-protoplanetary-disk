@@ -259,6 +259,10 @@ class MCMCSampler:
             if step_count % 100 == 0 or (current_time - last_log_time) > 30:
                 self._log_diagnostics()
                 last_log_time = current_time
+
+            # Lightweight system watchdog (every 50 steps)
+            if self.logger and (step_count % 50 == 0):
+                self.logger.log_system_resources(disk_path=str(self.backend_path.parent))
             
             # Update progress bar with flush
             if show_progress:
