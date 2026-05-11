@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import time
+import shutil
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,11 @@ import json
 from typing import Optional, Dict, Any
 import threading
 import multiprocessing
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 class MCMCLogger:
     
@@ -160,6 +166,27 @@ class MCMCLogger:
         if autocorr_time:
             msg += f", τ={autocorr_time:.1f}"
         self.info(msg)
+
+    def log_system_resources(self, disk_path: str = None):
+        """Log lightweight RAM + disk health status for long production runs."""
+        try:
+            if psutil is not None:
+                vm = psutil.virtual_memory()
+                total_gb = vm.total / (1024**3)
+                available_gb = vm.available / (1024**3)
+                used_gb = total_gb - available_gb
+                used_pct = (used_gb / total_gb) * 100.0 if total_gb > 0 else float('nan')
+                ram_str = f"{used_gb:.1f}GB / {total_gb:.1f}GB ({used_pct:.1f}%)"
+            else:
+                ram_str = "n/a (psutil missing)"
+
+            target_path = disk_path or str(self.log_dir)
+            _, _, free = shutil.disk_usage(target_path)
+            free_gb = free / (1024**3)
+
+            self.info(f"[HEALTH CHECK] RAM Usage: {ram_str} | Disk Free: {free_gb:.1f}GB.")
+        except Exception as exc:
+            self.warning(f"[HEALTH CHECK] Resource check failed: {exc}")
 
     def close(self):
         for handler in self.logger.handlers:
