@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any
 import tempfile
 import json
+from datetime import datetime
 from scipy.ndimage import gaussian_filter, rotate as scipy_rotate
 from scipy.interpolate import interp1d
 from astropy.io import fits
@@ -60,6 +61,8 @@ try:
 except Exception as e:
     print(f"Error importing config: {e}")
     raise
+
+DUSTPY_TIMEOUT = 3000.0  # 50 minutes sniper watchdog perimeter
 
 # Import DustPy
 try:
@@ -154,6 +157,35 @@ class ForwardModelSimulatorV2:
             print(f"ERROR: {msg}")
             if exception:
                 print(f"  Exception: {exception}")
+
+    def _append_expensive_params_incident(self, params: Dict[str, float], error_detail: str):
+        """Append timeout/zombie incidents for post-mortem parameter analysis."""
+        try:
+            incident_path = Path(__file__).resolve().parent.parent / "expensive_params.txt"
+            payload = {
+                "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "event": "ZOMBIE_KILLED",
+                "error": error_detail,
+                "params": params,
+            }
+            with open(incident_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self._log_error(f"ZOMBIE KILLED logged to {incident_path}")
+        except Exception as persistence_error:
+            self._log_error(
+                f"Failed to persist expensive parameter incident: {persistence_error}",
+                exception=persistence_error,
+            )
+
+    def _invoke_cleanup_pool_if_available(self):
+        """Best-effort cleanup hook for leaked resources after watchdog termination."""
+        cleanup_hook = getattr(self, "_cleanup_pool", None)
+        if callable(cleanup_hook):
+            try:
+                cleanup_hook()
+                self._log_warning("Cleanup hook `_cleanup_pool()` executed after controlled termination.")
+            except Exception as cleanup_error:
+                self._log_warning(f"Cleanup hook `_cleanup_pool()` failed: {cleanup_error}")
     
     def __getstate__(self):
         """Pickle support: Logger is now a property, so pickling is automatic."""
@@ -368,6 +400,13 @@ class ForwardModelSimulatorV2:
             def monitored_update():
                 """Wrapper to inject progress monitoring"""
                 nonlocal last_log_time
+                elapsed = time.time() - start_time
+                if elapsed > DUSTPY_TIMEOUT:
+                    raise TimeoutError(
+                        f"DustPy watchdog exceeded {DUSTPY_TIMEOUT:.1f}s "
+                        f"at t={sim.t / c.year:.2e} yr"
+                    )
+
                 result = original_update()
                 iteration_count[0] += 1
                 
@@ -389,6 +428,16 @@ class ForwardModelSimulatorV2:
                 sim.run()
                 elapsed = time.time() - start_time
                 self._log_debug(f"✅ DustPy completed in {elapsed:.1f}s ({iteration_count[0]} iterations)")
+            except TimeoutError as timeout_error:
+                elapsed = time.time() - start_time
+                timeout_msg = (
+                    f"ZOMBIE KILLED: DustPy exceeded watchdog perimeter "
+                    f"({elapsed:.1f}s > {DUSTPY_TIMEOUT:.1f}s). Controlled termination."
+                )
+                self._log_error(timeout_msg, exception=timeout_error)
+                self._append_expensive_params_incident(params, str(timeout_error))
+                self._invoke_cleanup_pool_if_available()
+                return False, None
             except Exception as e:
                 self._log_debug(f"❌ DustPy simulation failed: {e}")
                 import traceback
